@@ -5,8 +5,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from six2one.auth import delete_login, find_project_root, load_login, request_headers, save_login
+from six2one.auth import delete_login, find_project_root, load_login, login_path, request_headers, save_login
 from six2one.errors import UsageError
 
 
@@ -21,6 +22,29 @@ class AuthTests(unittest.TestCase):
             found_root = find_project_root(nested)
 
             self.assertEqual(found_root, root.resolve())
+
+    def test_default_login_path_anchors_to_package_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_file = root / "six2one" / "auth.py"
+            package_file.parent.mkdir()
+            package_file.write_text("", encoding="utf-8")
+            (root / "pyproject.toml").write_text("[project]\nname = 'six2one'\n", encoding="utf-8")
+            with patch("six2one.auth.package_anchor_path", return_value=package_file):
+                path = login_path()
+
+        self.assertEqual(path, (root / ".six2one-login.json").resolve())
+
+    def test_default_login_path_anchors_to_install_root_without_pyproject(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_root = Path(temp_dir) / "site-packages"
+            package_file = install_root / "six2one" / "auth.py"
+            package_file.parent.mkdir(parents=True)
+            package_file.write_text("", encoding="utf-8")
+            with patch("six2one.auth.package_anchor_path", return_value=package_file):
+                path = login_path()
+
+        self.assertEqual(path, install_root / ".six2one-login.json")
 
     def test_save_and_load_login(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -66,7 +90,7 @@ class AuthTests(unittest.TestCase):
             headers = request_headers(loaded_credentials)
 
             self.assertEqual(headers["Authorization"], f"Basic {expected_token}")
-            self.assertEqual(headers["User-Agent"], "six2one/0.1.0 (by hexerade on e621)")
+            self.assertEqual(headers["User-Agent"], "six2one/0.1.1 (by hexerade on e621)")
 
 
 if __name__ == "__main__":

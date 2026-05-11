@@ -162,7 +162,7 @@ $ 621 login nollafox YOUR_E621_API_KEY
 $ 621 logout
 ```
 
-`login` writes `.six2one-login.json` next to `pyproject.toml`, and `logout` removes it. The file is gitignored by default. When present, those credentials are used for HTTP Basic auth and a username-specific `User-Agent` on API requests.
+`login` writes `.six2one-login.json` next to the installed or source six2one project root, and `logout` removes it. The location is tied to where six2one itself lives on disk, not the directory where you run `621`. When present, those credentials are used for HTTP Basic auth and a username-specific `User-Agent` on API requests.
 
 That login flow is one part of being a well-behaved e621 client. The other part is pacing: six2one uses an instance-owned rate limiter capped at 2 requests per second, and it pages through search results in chunks of at most 320 posts per API call, which is the e621 post-search maximum. Even `--all` fetches use that same pacing and pagination.
 

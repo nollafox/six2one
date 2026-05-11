@@ -12,7 +12,7 @@ import aiohttp
 
 REQUESTS_PER_WINDOW: Final = 2
 RATE_LIMIT_WINDOW_SECONDS: Final = 1.0
-DEFAULT_USER_AGENT: Final = "six2one/0.1.0 (https://github.com/example/six2one)"
+DEFAULT_USER_AGENT: Final = "six2one/0.1.1 (https://github.com/example/six2one)"
 
 
 class RateLimiter:

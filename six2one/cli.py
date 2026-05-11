@@ -94,12 +94,13 @@ Notes:
   Always writes manifest.json for resume, dedupe, and future dataset operations.
   Existing manifests require --resume, --merge, or --force-new.
 """
-LOGIN_DESCRIPTION = """Save e621 API credentials in the project root."""
+LOGIN_DESCRIPTION = """Save e621 API credentials in the six2one project root."""
 LOGIN_EPILOG = """
-The login file is written to .six2one-login.json next to pyproject.toml.
+The login file is written to .six2one-login.json next to the installed/source
+six2one project root, independent of the directory where 621 is run.
 It is used for Basic auth and for a username-specific User-Agent.
 """
-LOGOUT_DESCRIPTION = """Delete the saved project-local e621 API credentials."""
+LOGOUT_DESCRIPTION = """Delete the saved six2one project e621 API credentials."""
 PRUNE_DESCRIPTION = """Remove incomplete image/caption/post sibling sets from an output directory."""
 PRUNE_EPILOG = """
 Prune creates missing output directories, removes incomplete sibling files,

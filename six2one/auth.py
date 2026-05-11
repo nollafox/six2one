@@ -1,4 +1,4 @@
-"""Project-local e621 login storage and request headers."""
+"""Project-root e621 login storage and request headers."""
 
 import base64
 from dataclasses import dataclass
@@ -29,7 +29,7 @@ def find_project_root(start_path: Path | None = None) -> Path:
     Raises:
         UsageError: If no project marker is found.
     """
-    current_path = Path.cwd() if start_path is None else start_path
+    current_path = package_anchor_path() if start_path is None else start_path
     resolved_path = current_path.resolve()
     search_path = resolved_path if resolved_path.is_dir() else resolved_path.parent
     for candidate in (search_path, *search_path.parents):
@@ -41,13 +41,13 @@ def find_project_root(start_path: Path | None = None) -> Path:
 
 
 def login_path(project_root: Path | None = None) -> Path:
-    """Return the login file path for the project root."""
-    root = find_project_root() if project_root is None else project_root
+    """Return the login file path for the six2one project root."""
+    root = _default_login_root() if project_root is None else project_root
     return root / LOGIN_FILENAME
 
 
 def save_login(username: str, api_key: str, project_root: Path | None = None) -> Path:
-    """Save login credentials to the project root.
+    """Save login credentials to the six2one project root.
 
     Raises:
         UsageError: If username or api key is empty.
@@ -58,6 +58,7 @@ def save_login(username: str, api_key: str, project_root: Path | None = None) ->
         "username": credentials.username,
         "api_key": credentials.api_key,
     }
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(data, file, indent=2, sort_keys=True)
         file.write("\n")
@@ -66,7 +67,7 @@ def save_login(username: str, api_key: str, project_root: Path | None = None) ->
 
 
 def delete_login(project_root: Path | None = None) -> Path:
-    """Delete the project login file.
+    """Delete the six2one project login file.
 
     Raises:
         UsageError: If the login file does not exist.
@@ -79,7 +80,7 @@ def delete_login(project_root: Path | None = None) -> Path:
 
 
 def load_login(project_root: Path | None = None) -> LoginCredentials | None:
-    """Load project login credentials if present.
+    """Load six2one project login credentials if present.
 
     Raises:
         UsageError: If the login file is malformed.
@@ -112,6 +113,18 @@ def request_headers(credentials: LoginCredentials | None) -> dict[str, str]:
         "Authorization": f"Basic {token.decode('ascii')}",
         "User-Agent": f"{TOOL_NAME}/{TOOL_VERSION} (by {credentials.username} on e621)",
     }
+
+
+def package_anchor_path() -> Path:
+    """Return an on-disk path inside the installed/source six2one package."""
+    return Path(__file__).resolve()
+
+
+def _default_login_root() -> Path:
+    try:
+        return find_project_root()
+    except UsageError:
+        return package_anchor_path().parent.parent
 
 
 def _credentials_from_values(username: object, api_key: object) -> LoginCredentials:

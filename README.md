@@ -1,15 +1,9 @@
 # six2one
 
 <p align="center">
-  <img src="./docs/banner.png" alt="six2one banner" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12); max-width: 100%; height: auto;">
+  <img src="https://github.com/nollafox/six2one/raw/main/docs/banner.png" alt="six2one banner" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12); max-width: 100%; height: auto;">
 </p>
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#how-queries-compile">Queries</a> •
-  <a href="#the-manifest">Manifest</a> •
-  <a href="#commands">Commands</a>
-</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-1E90FF" alt="Python 3.10+">
@@ -22,9 +16,11 @@
 </p>
 
 <p align="center">
-  <strong>Manifest-backed e621 and e926 fetching from a single command.</strong>
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#how-queries-compile">Queries</a> •
+  <a href="#the-manifest">Manifest</a> •
+  <a href="#commands">Commands</a>
 </p>
-
 
 **six2one** is a small command-line fetcher for e621 and e926. Pass it the same tags you'd type into the site search; it compiles them into a query, downloads matching posts in API-friendly pages, and writes each image alongside a caption file generated from its tags and the raw post JSON. Behind that, a `manifest.json` records everything as it goes so you can resume, dedupe, repair, inspect, and prune without managing state yourself.
 
@@ -32,21 +28,21 @@ The result is a CLI that stays pleasant for one-off searches and trustworthy for
 
 ## Quick Start
 
-Install six2one onto your `PATH` from the project directory:
+Install six2one from PyPI:
 
 ```bash
-python -m pip install --user pipx
-python -m pipx ensurepath
-pipx install .
+$ python -m pip install six2one
 ```
 
-Fetch your first set:
+That installs the `621` and `926` commands onto your `PATH`.
+
+The following command searches e621 for `fox solo rating:s` and begins to download the posts returned:
 
 ```bash
-621 fox solo --safe
+$ 621 fox solo --safe
 ```
 
-That drops into `output/fox-solo-safe/` with this layout:
+This will download into `output/fox-solo-safe/` with the following layout:
 
 ```
 output/fox-solo-safe/
@@ -56,41 +52,48 @@ output/fox-solo-safe/
   manifest.json
 ```
 
-Use `--dry-run` to see the compiled query before downloading anything:
+Alternatively, for the safe-only sister site, pass `--site e926`, or use the `926` binary, which applies that site default automatically:
+
+```bash
+$ 926 fox solo --safe
+```
+
+You may also use `--dry-run` to see the compiled query before downloading anything:
 
 ```
 $ 621 fox solo --safe --dry-run
 Compiled query: fox solo rating:s
 ```
 
-For an editable install without Poetry, use `python -m pip install --user -e .`. If `621` installs but your shell cannot find it, run `python -m site --user-base`; the binary lives under that path's `bin/` directory, or `Scripts\` on Windows.
+For an isolated CLI install, use `pipx install six2one`. For an editable install from a local clone, use `python -m pip install --user -e .`. If `621` installs but your shell cannot find it, run `python -m site --user-base`; the binary lives under that path's `bin/` directory, or `Scripts\` on Windows.
 
 ## How Queries Compile
 
 Tags pass through to e621 unchanged. Artist tags, OR terms, exclusions, and rating get appended in a fixed order, and `--dry-run` shows exactly what comes out:
 
-```
+```bash
 $ 621 fox solo \
     --author some_artist \
     --any cat,dog \
     --exclude chicken,watermark,comic \
     --safe \
     --dry-run
-Compiled query: fox solo some_artist ~cat ~dog -chicken -watermark -comic rating:s
+
+# Compiled query: fox solo some_artist ~cat ~dog -chicken -watermark -comic rating:s
 ```
 
 That compiled string is what you'd type into the e621 search bar, which is also why six2one's parser stays thin. The flags are conveniences for patterns six2one already knows; everything else, including wildcards (`cat*`), single-dash negation (`-comic`), and grouped OR syntax (`( ~cat ~dog )`), passes through to e621's native [search syntax](https://e621.net/help/cheatsheet). Unknown long options stay CLI errors rather than being silently forwarded, but anything that works in the search bar works here:
 
 ```bash
-621 "( ~cat ~tiger ~leopard ) ( ~dog ~wolf )" --safe
-621 fox african_wild_dog -chicken
+$ 621 "( ~cat ~tiger ~leopard ) ( ~dog ~wolf )" --safe
+$ 621 fox african_wild_dog -chicken
 ```
 
 To fetch more than the 320-post default, raise `--limit` or use `--all`. The downloader continues in API-sized pages until it reaches the requested count or the query is exhausted:
 
 ```bash
-621 fox solo --safe --limit 1000
-621 dragon solo --explicit --all --resume
+$ 621 fox solo --safe --limit 1000
+$ 621 dragon solo --explicit --all --resume
 ```
 
 ## The Manifest
@@ -100,9 +103,9 @@ Every output folder gets a `manifest.json` that records what's been downloaded, 
 The same record also controls how six2one handles folders it has already touched. By default, it refuses to fetch into a folder with an existing manifest until you choose the intended mode:
 
 ```bash
-621 fox solo --safe --resume     # continue the same query
-621 fox --any cat,dog --merge    # add a different query to the same folder
-621 fox solo --safe --force-new  # start over without deleting files
+$ 621 fox solo --safe --resume     # continue the same query
+$ 621 fox --any cat,dog --merge    # add a different query to the same folder
+$ 621 fox solo --safe --force-new  # start over without deleting files
 ```
 
 The continuation rules follow from those three modes:
@@ -155,8 +158,8 @@ usage: 621 [fetch] [TAGS ...] [options]
 ### Login
 
 ```bash
-621 login nollafox YOUR_E621_API_KEY
-621 logout
+$ 621 login nollafox YOUR_E621_API_KEY
+$ 621 logout
 ```
 
 `login` writes `.six2one-login.json` next to `pyproject.toml`, and `logout` removes it. The file is gitignored by default. When present, those credentials are used for HTTP Basic auth and a username-specific `User-Agent` on API requests.
@@ -166,15 +169,15 @@ That login flow is one part of being a well-behaved e621 client. The other part 
 For the safe-only sister site, pass `--site e926` to any fetch or show command, or use the `926` binary, which applies that site default automatically:
 
 ```bash
-621 fox solo --site e926 --all
-926 fox solo --all
-926 show 6394158 --fetch  # fetch from e926 if available there
+$ 621 fox solo --site e926 --all
+$ 926 fox solo --all
+$ 926 show 6394158 --fetch  # fetch from e926 if available there
 ```
 
 ### Fetch
 
 ```bash
-621 [fetch] TAGS... [options]
+$ 621 [fetch] TAGS... [options]
 ```
 
 | Option | Meaning |
@@ -203,8 +206,7 @@ Hidden compatibility aliases still work: `--continue` for `--resume`, `--or` for
 ### Show metadata
 
 ```bash
-621 show 6394158
-621 metadata 6394158
+$ 621 show 6394158 
 ```
 
 `show` searches recursively under `./output` for six2one `manifest.json` files and returns a merged JSON view for matching posts. The `metadata` command is an alias. Each result combines the manifest post entry, `posts/<id>.json` when present, `captions/<id>.txt` when present, and filesystem-derived paths, existence flags, and file sizes.
@@ -212,55 +214,46 @@ Hidden compatibility aliases still work: `--continue` for `--resume`, `--or` for
 By default, `show` reads only what is already on disk. Use `--root` to search a narrower folder, `--all` to show every manifest entry under that root, and `--fetch` to fetch remote post JSON only when an ID is missing locally:
 
 ```bash
-621 show --all --root output/fox-solo-safe
-926 show 6394158 --fetch  # fetch from e926 if available there
+$ 621 show --all --root output/fox-solo-safe
+
+# fetch from e926 if available there
+$ 926 show 6394158 --fetch  
 ```
 
 The merged object is filterable with dotted paths. Repeated filters and comma-separated filters are both accepted:
 
 ```bash
-621 show 6394158 \
+$ 621 show 6394158 \
   --filter local.image.absolute_path \
   --filter caption.text \
   --filter post.file.url
 
-621 show 6394158 -f local.image.absolute_path,caption.text,post.file.url
+$ 621 show 6394158 -f local.image.absolute_path,caption.text,post.file.url
 ```
 
 Filtered keys flatten to their unique leaf names, so `caption.text` becomes `text`. If leaf names collide, six2one keeps enough path context to avoid overwriting values. Without filters, the full merged object is printed.
 
 ```bash
-621 show 6394158 -f local.image.absolute_path,caption.text,post.file.url --pretty
+$ 621 show 6394158 -f local.image.absolute_path,caption.text,post.file.url --pretty
+
+# {
+#   "results": [
+#     {
+#       "absolute_path": "/Users/nollafox/output/fox-solo-safe/images/000006394158.jpg",
+#       "text": "anthro, ... english_text, hi_res, signature",
+#       "url": "https://static1.e621.net/data/51/b5/51b5a2f0925e153c2890e37836024f77.jpg"
+#     }
+#   ]
+# }
 ```
-
-```json
-{
-  "results": [
-    {
-      "absolute_path": "/Users/fox/Workspace/nollafox/six2one/output/fox-solo-safe/images/000006394158.jpg",
-      "text": "anthro, ascot, belly, belt, big_belly, bottomwear, claws, clothed, clothing, dialogue, error_message, fangs, fur, hair, hand_behind_head, hand_on_belly, inner_ear_fluff, jacket, male, obese, obese_anthro, obese_male, open_mouth, overweight, overweight_anthro, overweight_male, pants, paws, shirt, solo, speech_bubble, standing, standing_on_scale, tail, teeth, text, tongue, topwear, tuft, weighing_scale, canid, canine, fox, mammal, fox_mccloud, nintendo, star_fox, dragontzin, 2026, english_text, hi_res, signature",
-      "url": "https://static1.e621.net/data/51/b5/51b5a2f0925e153c2890e37836024f77.jpg"
-    }
-  ]
-}
-```
-
-Output modes:
-
-```bash
-621 show 6394158 --pretty
-621 show 6394158 -f caption.text --raw
-621 show --all --root output/fox-solo-safe \
-  -f id,local.image.absolute_path,caption.text,post.rating \
-  --jsonl
-```
-
 That makes it easy to export a local dataset index for scripts, audits, or LoRA training prep.
+
+
 
 ### Prune
 
 ```bash
-621 prune [output_dir]
+$ 621 prune [output_dir]
 ```
 
 Prune scans the output folder for incomplete sibling sets. If an image is deleted by hand but its caption or post JSON remains, `621 prune` removes the orphaned companions and updates the manifest so a later `fetch --resume` can repair the set cleanly. If the output directory does not exist yet, prune creates it and exits.
@@ -270,17 +263,17 @@ Prune scans the output folder for incomplete sibling sets. If an image is delete
 Install with Poetry:
 
 ```bash
-poetry install
+$ poetry install
 ```
 
 Run the CLI, the tests, and the compile check from inside the Poetry environment:
 
 ```bash
-poetry run 621 --help
-poetry run 926 fox solo --dry-run
-poetry run 621 show --help
-poetry run python -m unittest discover -s tests
-poetry run python -m compileall -q six2one
+$ poetry run 621 --help
+$ poetry run 926 fox solo --dry-run
+$ poetry run 621 show --help
+$ poetry run python -m unittest discover -s tests
+$ poetry run python -m compileall -q six2one
 ```
 
 <br>

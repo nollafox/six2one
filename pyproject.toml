@@ -1,22 +1,42 @@
 [project]
 name = "six2one"
 version = "0.1.0"
-description = ""
+description = "Manifest-backed e621/e926 dataset fetching from tiny numeric commands."
 authors = [
     {name = "Nolla Fox",email = "nollafox.dev@gmail.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "aiohttp (>=3.13.5,<4.0.0)",
-    "aiofiles (>=25.1.0,<26.0.0)",
-    "tqdm (>=4.67.3,<5.0.0)"
+    "aiohttp>=3.13.5,<4.0.0",
+    "aiofiles>=25.1.0,<26.0.0",
+    "tqdm>=4.67.3,<5.0.0"
+]
+keywords = ["e621", "e926", "dataset", "downloader", "cli", "manifest"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Multimedia :: Graphics",
 ]
 
 
 [project.scripts]
 621 = "six2one.cli:sync_main"
 926 = "six2one.cli:sync_main"
+
+
+[project.urls]
+Homepage = "https://github.com/nollafox/six2one"
+Repository = "https://github.com/nollafox/six2one"
+Issues = "https://github.com/nollafox/six2one/issues"
 
 
 [tool.poetry]

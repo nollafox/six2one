@@ -11,6 +11,7 @@ from .errors import UsageError
 from .models import TOOL_NAME, TOOL_VERSION
 
 
+ACCEPT_ENCODING: Final = "gzip, deflate"
 LOGIN_FILENAME: Final = ".six2one-login.json"
 PROJECT_MARKER_FILENAME: Final = "pyproject.toml"
 
@@ -106,10 +107,12 @@ def request_headers(credentials: LoginCredentials | None) -> dict[str, str]:
     """Build HTTP headers for API requests."""
     if credentials is None:
         return {
+            "Accept-Encoding": ACCEPT_ENCODING,
             "User-Agent": f"{TOOL_NAME}/{TOOL_VERSION}",
         }
     token = base64.b64encode(f"{credentials.username}:{credentials.api_key}".encode("utf-8"))
     return {
+        "Accept-Encoding": ACCEPT_ENCODING,
         "Authorization": f"Basic {token.decode('ascii')}",
         "User-Agent": f"{TOOL_NAME}/{TOOL_VERSION} (by {credentials.username} on e621)",
     }

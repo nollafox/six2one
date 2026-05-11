@@ -12,7 +12,8 @@ import aiohttp
 
 REQUESTS_PER_WINDOW: Final = 2
 RATE_LIMIT_WINDOW_SECONDS: Final = 1.0
-DEFAULT_USER_AGENT: Final = "six2one/0.1.1 (https://github.com/example/six2one)"
+DEFAULT_USER_AGENT: Final = "six2one/0.1.2 (https://github.com/example/six2one)"
+DEFAULT_ACCEPT_ENCODING: Final = "gzip, deflate"
 
 
 class RateLimiter:
@@ -54,9 +55,14 @@ class RequestAdapter:
         rate_limiter: RateLimiter | None = None,
     ) -> None:
         if headers is None:
-            self._headers = {"User-Agent": DEFAULT_USER_AGENT}
+            self._headers = {
+                "Accept-Encoding": DEFAULT_ACCEPT_ENCODING,
+                "User-Agent": DEFAULT_USER_AGENT,
+            }
         else:
             self._headers = dict(headers)
+            if "Accept-Encoding" not in self._headers:
+                self._headers["Accept-Encoding"] = DEFAULT_ACCEPT_ENCODING
         if rate_limiter is None:
             self._rate_limiter = RateLimiter()
         else:

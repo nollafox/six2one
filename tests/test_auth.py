@@ -89,8 +89,14 @@ class AuthTests(unittest.TestCase):
 
             headers = request_headers(loaded_credentials)
 
+            self.assertEqual(headers["Accept-Encoding"], "gzip, deflate")
             self.assertEqual(headers["Authorization"], f"Basic {expected_token}")
-            self.assertEqual(headers["User-Agent"], "six2one/0.1.1 (by hexerade on e621)")
+            self.assertEqual(headers["User-Agent"], "six2one/0.1.2 (by hexerade on e621)")
+
+    def test_anonymous_headers_disable_brotli(self) -> None:
+        headers = request_headers(None)
+
+        self.assertEqual(headers["Accept-Encoding"], "gzip, deflate")
 
 
 if __name__ == "__main__":

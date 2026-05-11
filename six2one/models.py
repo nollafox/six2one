@@ -9,7 +9,7 @@ from typing import Final
 DEFAULT_OUTPUT_DIR: Final = Path("./output")
 DEFAULT_FETCH_LIMIT: Final = 320
 TOOL_NAME: Final = "six2one"
-TOOL_VERSION: Final = "0.1.1"
+TOOL_VERSION: Final = "0.1.2"
 
 
 class Site(str, Enum):

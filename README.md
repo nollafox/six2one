@@ -22,7 +22,7 @@
   <a href="#commands">Commands</a>
 </p>
 
-**six2one** is a small command-line fetcher for e621 and e926. Pass it the same tags you'd type into the site search; it compiles them into a query, downloads matching posts in API-friendly pages, and writes each image alongside a caption file generated from its tags and the raw post JSON. Behind that, a `manifest.json` records everything as it goes so you can resume, dedupe, repair, inspect, and prune without managing state yourself.
+**six2one** is a small command-line fetcher for e621 and e926. Pass it the same tags you'd type into the site search; it compiles them into a query, downloads matching posts in API-friendly pages, and stores post JSON plus images in a manifest-backed local cache. The `manifest.json` records where each post's metadata and image variants live, so you can resume, dedupe, repair, inspect, and prune without managing state yourself.
 
 The result is a CLI that stays pleasant for one-off searches and trustworthy for long-running collections: reference folders for a particular artist, archives of a saved search, the occasional small dataset.
 
@@ -46,9 +46,11 @@ This will download into `output/fox-solo-safe/` with the following layout:
 
 ```
 output/fox-solo-safe/
+  json/
   images/
-  captions/
-  posts/
+    preview/
+    sample/
+    original/
   manifest.json
 ```
 
@@ -98,42 +100,42 @@ $ 621 dragon solo --explicit --all --resume
 
 ## The Manifest
 
-Every output folder gets a `manifest.json` that records what's been downloaded, keyed by numeric post ID, and which queries produced it, keyed by compiled query, site, and image size. That record keeps the folder understandable across sessions: you can stop a fetch, come back later, and continue without reasoning from whatever happens to be on disk.
+Every output folder gets a `manifest.json` that records downloaded posts by numeric post ID, with relative paths to the post JSON and any cached image variants. It also records each compiled query, the site it came from, and the cursor needed to continue that search later. That record keeps the folder understandable across sessions: you can stop a fetch, come back later, and continue without reasoning from whatever happens to be on disk.
 
-The same record also controls how six2one handles folders it has already touched. By default, it refuses to fetch into a folder with an existing manifest until you choose the intended mode:
+The same record also controls how six2one handles folders it has already touched. Existing manifests are reused as a cache across searches. If a post is already recorded and the requested image size exists, six2one skips the download. If the manifest says a JSON file or image should exist but it is missing, the next fetch repairs that entry before continuing.
 
 ```bash
-$ 621 fox solo --safe --resume     # continue the same query
-$ 621 fox --any cat,dog --merge    # add a different query to the same folder
-$ 621 fox solo --safe --force-new  # start over without deleting files
+$ 621 fox solo --safe              # use cached posts, then fetch up to the limit
+$ 621 fox solo --safe --resume     # fetch the next limit's worth of posts
+$ 621 dragon solo --explicit --all --resume
 ```
 
-The continuation rules follow from those three modes:
+The continuation rules follow from that cache:
 
 | Situation | Behavior |
 |---|---|
-| Same query, same output, same size and site, `--resume` | Continue from manifest state. |
-| Same query with a higher limit | Continue until the new limit. |
-| Same query with a lower limit | Keep existing files; nothing is deleted. |
-| Different query in the same output | Fail unless `--merge` or `--force-new` is used. |
-| Manifest-listed files are missing | Redownload or regenerate them. |
-| Files exist that aren't in the manifest | Ignore them unless `--adopt-existing` is used. |
-| Target path collision | Fail unless adoption is explicitly valid. |
+| Same query without `--resume` | Start the search from the latest results and stop at the requested limit, skipping cached posts. |
+| Same query with `--resume` | Continue after the previous cursor and fetch the next requested count, or to the end with `--all`. |
+| Different query in the same output | Add a new query state and reuse any already cached posts. |
+| Same post, different image size | Download only the missing size and record it under the same post entry. |
+| Manifest-listed files are missing | Refetch post JSON or image files to heal the cache. |
+| Files exist that aren't in the manifest | Leave them alone; the manifest is the cache index. |
 
-Six2one checks the manifest to decide what work still needs doing. If a post is already recorded and its files exist, it skips it; if something should be there but is missing, the next fetch can redownload or regenerate it. You do not edit the manifest directly.
+You do not edit the manifest directly. It is deliberately path-oriented rather than a second copy of the post metadata; the canonical post data lives in `json/<id>.json`.
 
 ## What's in the Output Folder
 
 The layout is stable:
 
 ```
-images/      downloaded media
-captions/    text caption per post, generated from its tags
-posts/       raw post JSON record per post
+json/                 raw post JSON record per post
+images/preview/       preview images
+images/sample/        sample images
+images/original/      original files
 manifest.json
 ```
 
-Captions and post JSON are siblings of each image. Those companion files make the folder useful after the download is over: grep for tags, re-derive metadata, rebuild a downstream index, or use `show` to merge the manifest entry, caption text, raw post JSON, and local file paths into one view of a post.
+Post JSON is stored once per post, and image variants are stored by size. That keeps the output folder useful after the download is over: grep the JSON, re-derive captions from tags, rebuild a downstream index, or use `show` to merge the manifest entry, raw post JSON, and local file paths into one view of a post.
 
 The `--size` flag controls which image variant to fetch, mapping directly to e621 and e926 post fields:
 
@@ -143,7 +145,7 @@ The `--size` flag controls which image variant to fetch, mapping directly to e62
 | `sample` | `post["sample"]` (default) |
 | `original` | `post["file"]` |
 
-If the chosen URL is missing for a post, six2one records a warning that `--strict` promotes to an error.
+If the chosen URL is missing for a post, six2one records a warning and still keeps any post JSON it was able to cache.
 
 ## Commands
 
@@ -193,13 +195,9 @@ $ 621 [fetch] TAGS... [options]
 | `-x, --exclude TAG` | Exclude tags as `-TAG`. Repeatable and comma-separated. |
 | `--site SITE` | `e621` or `e926`. Default: `e621` for `621`, `e926` for `926`. |
 | `--size MODE` | `preview`, `sample`, or `original`. Default: `sample`. |
-| `--resume` | Resume from an existing manifest with the same query and output. |
-| `--merge` | Merge a different query into an existing manifest. |
-| `--force-new` | Replace manifest state for a fresh run while leaving media files alone. |
-| `--adopt-existing` | Adopt colliding files only when matching post metadata already exists. |
+| `--resume` | Continue this query after its previous cursor, fetching the next requested count. |
 | `--dry-run` | Print the compiled query and exit. |
 | `--validate-tags` | Check concrete and wildcard tags against the tag API before fetching. |
-| `--strict` | Treat warnings, including missing file URLs, as errors. |
 
 Hidden compatibility aliases still work: `--continue` for `--resume`, `--or` for `--any`, and `--file` for `--size`.
 
@@ -209,7 +207,7 @@ Hidden compatibility aliases still work: `--continue` for `--resume`, `--or` for
 $ 621 show 6394158 
 ```
 
-`show` searches recursively under `./output` for six2one `manifest.json` files and returns a merged JSON view for matching posts. The `metadata` command is an alias. Each result combines the manifest post entry, `posts/<id>.json` when present, `captions/<id>.txt` when present, and filesystem-derived paths, existence flags, and file sizes.
+`show` searches recursively under `./output` for six2one `manifest.json` files and returns a merged JSON view for matching posts. The `metadata` command is an alias. Each result combines the manifest post entry, `json/<id>.json` when present, a derived caption built from post tags, and filesystem-derived paths, existence flags, and file sizes.
 
 By default, `show` reads only what is already on disk. Use `--root` to search a narrower folder, `--all` to show every manifest entry under that root, and `--fetch` to fetch remote post JSON only when an ID is missing locally:
 
@@ -239,7 +237,7 @@ $ 621 show 6394158 -f local.image.absolute_path,caption.text,post.file.url --pre
 # {
 #   "results": [
 #     {
-#       "absolute_path": "/Users/nollafox/output/fox-solo-safe/images/000006394158.jpg",
+#       "absolute_path": "/Users/nollafox/output/fox-solo-safe/images/sample/000006394158.jpg",
 #       "text": "anthro, ... english_text, hi_res, signature",
 #       "url": "https://static1.e621.net/data/51/b5/51b5a2f0925e153c2890e37836024f77.jpg"
 #     }
@@ -256,7 +254,7 @@ That makes it easy to export a local dataset index for scripts, audits, or LoRA 
 $ 621 prune [output_dir]
 ```
 
-Prune scans the output folder for incomplete sibling sets. If an image is deleted by hand but its caption or post JSON remains, `621 prune` removes the orphaned companions and updates the manifest so a later `fetch --resume` can repair the set cleanly. If the output directory does not exist yet, prune creates it and exits.
+Prune scans the output folder for manifest entries whose recorded JSON or image files are incomplete. If a cached file is deleted by hand, `621 prune` removes the remaining recorded companions for that post and updates the manifest so a later fetch can repair the cache cleanly. If the output directory does not exist yet, prune creates it and exits.
 
 ## Development
 

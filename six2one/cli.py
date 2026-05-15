@@ -10,7 +10,7 @@ import textwrap
 
 from .api import E621API
 from .auth import delete_login, save_login
-from .errors import FetchWarningError, Six2oneError, UsageError
+from .errors import Six2oneError, UsageError
 from .fetcher import FetchResult, run_fetch
 from .manifest import ManifestStartStatus
 from .models import (
@@ -20,7 +20,6 @@ from .models import (
     FetchConfig,
     FileMode,
     Rating,
-    ResumeMode,
     Site,
 )
 from .prune import PruneResult, prune_output
@@ -52,7 +51,6 @@ OPTIONS_REQUIRING_VALUE = {
     "--site",
     "--size",
     "--file",
-    "--resume-mode",
 }
 SHORT_OPTIONS_WITH_ATTACHED_VALUES = ("-o", "-n", "-x")
 KNOWN_SHORT_FLAGS = {"-h"}
@@ -92,7 +90,7 @@ Examples:
 
 Notes:
   Always writes manifest.json for resume, dedupe, and future dataset operations.
-  Existing manifests require --resume, --merge, or --force-new.
+  Existing manifests are reused as a cache across searches.
 """
 LOGIN_DESCRIPTION = """Save e621 API credentials in the six2one project root."""
 LOGIN_EPILOG = """
@@ -101,10 +99,10 @@ six2one project root, independent of the directory where 621 is run.
 It is used for Basic auth and for a username-specific User-Agent.
 """
 LOGOUT_DESCRIPTION = """Delete the saved six2one project e621 API credentials."""
-PRUNE_DESCRIPTION = """Remove incomplete image/caption/post sibling sets from an output directory."""
+PRUNE_DESCRIPTION = """Remove manifest entries with incomplete cached files."""
 PRUNE_EPILOG = """
-Prune creates missing output directories, removes incomplete sibling files,
-and updates manifest.json when present so fetch --resume can repair them.
+Prune creates missing output directories, removes incomplete cached JSON/image
+files, and updates manifest.json when present so a later fetch can repair them.
 """
 SHOW_DESCRIPTION = """Display merged metadata for downloaded posts."""
 SHOW_EPILOG = """
@@ -150,7 +148,7 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
 
     prune_parser = subparsers.add_parser(
         PRUNE_COMMAND,
-        help="delete incomplete output sibling sets",
+        help="delete incomplete cached post entries",
         description=PRUNE_DESCRIPTION,
         epilog=textwrap.dedent(PRUNE_EPILOG).strip(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -345,7 +343,7 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
         "--resume",
         dest="continue_existing",
         action="store_true",
-        help="resume from an existing manifest with the same query/output",
+        help="continue this query after its previous cursor",
     )
     fetch_parser.add_argument(
         "--continue",
@@ -362,35 +360,6 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
         "--validate-tags",
         action="store_true",
         help="check concrete and wildcard tags against the tag API before fetching",
-    )
-    fetch_parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="treat warnings, including missing file URLs or tag validation warnings, as errors",
-    )
-    fetch_parser.add_argument(
-        "--merge",
-        dest="resume_mode",
-        action="store_const",
-        const=ResumeMode.MERGE.value,
-        help="merge a different query into an existing manifest",
-    )
-    fetch_parser.add_argument(
-        "--resume-mode",
-        dest="resume_mode",
-        choices=tuple(mode.value for mode in ResumeMode),
-        metavar="MODE",
-        help=argparse.SUPPRESS,
-    )
-    fetch_parser.add_argument(
-        "--force-new",
-        action="store_true",
-        help="replace manifest state for a fresh run while leaving existing files alone",
-    )
-    fetch_parser.add_argument(
-        "--adopt-existing",
-        action="store_true",
-        help="adopt colliding files only when matching post metadata already exists",
     )
     return parser
 
@@ -474,7 +443,6 @@ def _default_site_for_command(command_name: str) -> Site:
 
 
 def _config_from_namespace(namespace: argparse.Namespace) -> FetchConfig:
-    _validate_manifest_mode_flags(namespace)
     limit = _limit_from_namespace(namespace)
     rating = _rating_from_namespace(namespace)
     tags = _restore_single_dash_tags(namespace.tags)
@@ -495,10 +463,6 @@ def _config_from_namespace(namespace: argparse.Namespace) -> FetchConfig:
         continue_existing=namespace.continue_existing,
         dry_run=namespace.dry_run,
         validate_tags=namespace.validate_tags,
-        strict=namespace.strict,
-        resume_mode=ResumeMode.from_optional_value(namespace.resume_mode),
-        force_new=namespace.force_new,
-        adopt_existing=namespace.adopt_existing,
     )
 
 
@@ -599,18 +563,6 @@ def _slug_exclude_tag(value: str) -> str:
     return f"not-{value.removeprefix('-')}"
 
 
-def _validate_manifest_mode_flags(namespace: argparse.Namespace) -> None:
-    selected_modes = 0
-    if namespace.continue_existing:
-        selected_modes += 1
-    if namespace.resume_mode is not None:
-        selected_modes += 1
-    if namespace.force_new:
-        selected_modes += 1
-    if selected_modes > 1:
-        raise UsageError("--resume, --merge, and --force-new are mutually exclusive")
-
-
 def _normalize_fetch_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
     if not argv:
         return argv
@@ -694,10 +646,7 @@ async def _validate_dry_run_if_requested(config: FetchConfig, query: CompiledQue
     if not config.validate_tags:
         return ()
     async with E621API(config.site) as api:
-        warnings = await validate_compiled_query(api, query)
-    if config.strict and warnings:
-        raise FetchWarningError("; ".join(warnings))
-    return warnings
+        return await validate_compiled_query(api, query)
 
 
 def _write_dry_run(compiled_query: str, warnings: tuple[str, ...]) -> None:
@@ -710,23 +659,20 @@ def _write_fetch_result(result: FetchResult) -> None:
     requested_limit_text = _requested_limit_text(result.requested_limit)
     if result.manifest_found:
         sys.stdout.write(f"Found {result.manifest_path}\n")
-    if result.start_status is ManifestStartStatus.CONTINUE:
+    if result.start_status is ManifestStartStatus.RESUME:
         sys.stdout.write(f"Same compiled query: {result.compiled_query}\n")
         sys.stdout.write(
-            "Continuing from page "
-            f"{result.starting_page}, "
+            "Continuing after "
             f"{result.starting_downloaded_count}/{requested_limit_text} downloaded\n"
         )
-    elif result.start_status is ManifestStartStatus.MERGE:
-        sys.stdout.write(f"Merged compiled query: {result.compiled_query}\n")
-    elif result.start_status is ManifestStartStatus.FORCE_NEW:
-        sys.stdout.write(f"Starting new manifest state for: {result.compiled_query}\n")
+    elif result.start_status is ManifestStartStatus.SEARCH:
+        sys.stdout.write(f"Using manifest cache for: {result.compiled_query}\n")
     for warning in result.warnings:
         sys.stderr.write(f"warning: {warning}\n")
     sys.stdout.write(
         f"Downloaded {result.downloaded_count}/{requested_limit_text} posts "
         f"({result.media_downloaded_count} media files fetched, "
-        f"{result.skipped_count} skipped, {result.adopted_count} adopted)\n"
+        f"{result.skipped_count} skipped)\n"
     )
 
 

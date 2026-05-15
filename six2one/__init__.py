@@ -1,3 +1,5 @@
 """Manifest-backed e621/e926 dataset fetching."""
 
-__version__ = "0.1.2"
+from .models import TOOL_VERSION
+
+__version__ = TOOL_VERSION

@@ -9,7 +9,7 @@ from typing import Final
 DEFAULT_OUTPUT_DIR: Final = Path("./output")
 DEFAULT_FETCH_LIMIT: Final = 320
 TOOL_NAME: Final = "six2one"
-TOOL_VERSION: Final = "0.1.2"
+TOOL_VERSION: Final = "0.2.0"
 
 
 class Site(str, Enum):
@@ -101,26 +101,6 @@ class Rating(str, Enum):
         return rating_aliases[normalized_value]
 
 
-class ResumeMode(str, Enum):
-    """Explicit manifest conflict handling modes."""
-
-    MERGE = "merge"
-
-    @classmethod
-    def from_optional_value(cls, value: str | None) -> "ResumeMode | None":
-        """Build an optional resume mode from CLI input.
-
-        Raises:
-            ValueError: If the value is not a supported resume mode.
-        """
-        if value is None:
-            return None
-        supported_values = {mode.value for mode in cls}
-        if value not in supported_values:
-            raise ValueError(f"Unsupported resume mode: {value}")
-        return cls(value)
-
-
 @dataclass(frozen=True)
 class FetchConfig:
     """Validated configuration for one fetch command."""
@@ -137,10 +117,6 @@ class FetchConfig:
     continue_existing: bool
     dry_run: bool
     validate_tags: bool
-    strict: bool
-    resume_mode: ResumeMode | None
-    force_new: bool
-    adopt_existing: bool
 
 
 @dataclass(frozen=True)

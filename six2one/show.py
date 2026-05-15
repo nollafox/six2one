@@ -157,17 +157,23 @@ def _merged_local_result(
     root_absolute = _root_absolute(manifest_path, manifest)
     root_path = Path(root_absolute)
     queries = _queries_for_post(manifest, post_id)
-    image_mode = _image_mode(post_record, queries)
-    image_record = _dict_value(_dict_value(post_record, "files"), image_mode)
-    caption_record = _dict_value(post_record, "caption")
-    post_json_record = _dict_value(post_record, "post")
-    caption_path_text = _str_value(caption_record, "path")
-    post_json_path_text = _str_value(post_json_record, "path")
+    file_paths = _dict_value(post_record, "file_paths")
+    image_paths = _dict_value(file_paths, "image_paths")
+    image_mode = _image_mode(image_paths, queries)
+    image_path_text = image_paths.get(image_mode)
+    if not isinstance(image_path_text, str):
+        raise UsageError("Manifest post has no selected image path")
+    post_json_path_text = _str_value(file_paths, "json")
     post_json = _read_json_if_present(root_path / post_json_path_text)
+    caption_text = _caption_text(post_json)
+    caption_path_text = f"captions/{post_id:012d}.txt"
     caption_file_text = _read_text_if_present(root_path / caption_path_text)
-    caption_text = caption_file_text
+    if caption_file_text is not None:
+        caption_text = caption_file_text
     if caption_text is None:
-        caption_text = caption_record.get("text") if isinstance(caption_record.get("text"), str) else None
+        legacy_caption = post_record.get("caption")
+        if isinstance(legacy_caption, dict) and isinstance(legacy_caption.get("text"), str):
+            caption_text = legacy_caption["text"]
 
     return {
         "id": post_id,
@@ -176,7 +182,7 @@ def _merged_local_result(
         "root_absolute": root_absolute,
         "remote_only": False,
         "local": {
-            "image": _local_file(root_path, _str_value(image_record, "path"), mode=image_mode),
+            "image": _local_file(root_path, image_path_text, mode=image_mode),
             "caption": _local_file(root_path, caption_path_text),
             "post": _local_file(root_path, post_json_path_text),
             "manifest": {
@@ -185,7 +191,7 @@ def _merged_local_result(
             },
         },
         "caption": {
-            "path": caption_path_text,
+            "path": None,
             "text": caption_text,
         },
         "manifest": copy.deepcopy(post_record),
@@ -243,14 +249,14 @@ def _queries_for_post(manifest: dict[str, Any], post_id: int) -> list[dict[str, 
     return queries
 
 
-def _image_mode(post_record: dict[str, Any], queries: list[dict[str, Any]]) -> str:
-    files = _dict_value(post_record, "files")
+def _image_mode(image_paths: dict[str, Any], queries: list[dict[str, Any]]) -> str:
     for query in queries:
         file_mode = query.get("file_mode")
-        if isinstance(file_mode, str) and file_mode in files:
+        if isinstance(file_mode, str) and isinstance(image_paths.get(file_mode), str):
             return file_mode
-    for file_mode in sorted(files):
-        return file_mode
+    for file_mode in ("sample", "preview", "original"):
+        if isinstance(image_paths.get(file_mode), str):
+            return file_mode
     raise UsageError("Manifest post has no file metadata")
 
 
@@ -293,6 +299,20 @@ def _local_file(root_path: Path, relative_path: str, mode: str | None = None) ->
     if absolute_path.exists():
         result["size_bytes"] = absolute_path.stat().st_size
     return result
+
+
+def _caption_text(post_json: dict[str, Any] | None) -> str | None:
+    if post_json is None:
+        return None
+    tags = post_json.get("tags")
+    if not isinstance(tags, dict):
+        return None
+    values: list[str] = []
+    for category in ("general", "species", "character", "copyright", "artist", "meta", "lore"):
+        category_values = tags.get(category)
+        if isinstance(category_values, list):
+            values.extend(str(value) for value in category_values if isinstance(value, str))
+    return ", ".join(values)
 
 
 def _selected_results(results: tuple[dict[str, Any], ...], filters: tuple[str, ...]) -> list[dict[str, Any]]:

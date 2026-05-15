@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from six2one.models import FetchConfig, FileMode, Rating, ResumeMode, Site
+from six2one.models import FetchConfig, FileMode, Rating, Site
 
 
 ORIGINAL_BYTES = b"original-file-bytes"
@@ -25,10 +25,6 @@ def make_config(
     continue_existing: bool = False,
     dry_run: bool = False,
     validate_tags: bool = False,
-    strict: bool = False,
-    resume_mode: ResumeMode | None = None,
-    force_new: bool = False,
-    adopt_existing: bool = False,
 ) -> FetchConfig:
     return FetchConfig(
         tags=tags,
@@ -43,10 +39,6 @@ def make_config(
         continue_existing=continue_existing,
         dry_run=dry_run,
         validate_tags=validate_tags,
-        strict=strict,
-        resume_mode=resume_mode,
-        force_new=force_new,
-        adopt_existing=adopt_existing,
     )
 
 

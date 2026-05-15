@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  printf 'Usage: scripts/publish VERSION\n' >&2
+  printf 'Example: scripts/publish 0.1.3\n' >&2
+  exit 1
+fi
+
+VERSION="$1"
+
+if [[ ! "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+  printf 'Error: version must look like a Python package version, got: %s\n' "$VERSION" >&2
+  exit 1
+fi
+
+if [[ -z "${SIX2ONE_PYPI_TOKEN:-}" ]]; then
+  printf 'Error: SIX2ONE_PYPI_TOKEN is not set.\n' >&2
+  printf 'Export it before publishing: export SIX2ONE_PYPI_TOKEN=...\n' >&2
+  exit 1
+fi
+
+python - "$VERSION" <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+version = sys.argv[1]
+replacements = {
+    Path("pyproject.toml"): (
+        r'(?m)^version = "[^"]+"$',
+        f'version = "{version}"',
+    ),
+    Path("six2one/models.py"): (
+        r'(?m)^TOOL_VERSION: Final = "[^"]+"$',
+        f'TOOL_VERSION: Final = "{version}"',
+    ),
+}
+
+for path, (pattern, replacement) in replacements.items():
+    text = path.read_text(encoding="utf-8")
+    updated, count = re.subn(pattern, replacement, text, count=1)
+    if count != 1:
+        raise SystemExit(f"Could not update version in {path}")
+    path.write_text(updated, encoding="utf-8")
+PY
+
+poetry run python -m unittest discover -s tests
+poetry build
+poetry publish \
+  --username __token__ \
+  --password "$SIX2ONE_PYPI_TOKEN"

@@ -12,10 +12,3 @@ class UsageError(Six2oneError):
 class ManifestError(Six2oneError):
     """Raised when manifest state blocks a fetch operation."""
 
-
-class PostDataError(Six2oneError):
-    """Raised when an API post does not contain required download metadata."""
-
-
-class FetchWarningError(Six2oneError):
-    """Raised when strict mode promotes a fetch warning to an error."""

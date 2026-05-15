@@ -1,6 +1,5 @@
-"""Manifest loading, normalization, and continuation policy."""
+"""Manifest loading, normalization, and query cursor state."""
 
-import copy
 from dataclasses import dataclass
 from enum import Enum
 import json
@@ -8,14 +7,13 @@ from pathlib import Path
 from typing import Any, Final
 
 from .errors import ManifestError
-from .models import CompiledQuery, FetchConfig, FileMode, ResumeMode, Site, TOOL_NAME, TOOL_VERSION
+from .models import CompiledQuery, FetchConfig, FileMode, Site, TOOL_NAME, TOOL_VERSION
 
 
 MANIFEST_FILENAME: Final = "manifest.json"
-MANIFEST_SCHEMA_VERSION: Final = 2
+MANIFEST_SCHEMA_VERSION: Final = 3
+JSON_DIR_NAME: Final = "json"
 IMAGE_DIR_NAME: Final = "images"
-CAPTION_DIR_NAME: Final = "captions"
-POST_DIR_NAME: Final = "posts"
 FILENAME_WIDTH: Final = 12
 
 
@@ -23,9 +21,8 @@ class ManifestStartStatus(str, Enum):
     """How a fetch run entered manifest state."""
 
     NEW = "new"
-    CONTINUE = "continue"
-    MERGE = "merge"
-    FORCE_NEW = "force_new"
+    SEARCH = "search"
+    RESUME = "resume"
 
 
 @dataclass(frozen=True)
@@ -37,122 +34,63 @@ class ManifestSession:
     query_key: str
     start_status: ManifestStartStatus
     manifest_found: bool
-    starting_page: int
     starting_downloaded_count: int
     requested_limit: int | None
 
 
 def manifest_path_for(output_dir: Path) -> Path:
-    """Return the manifest path for an output directory."""
     return output_dir / MANIFEST_FILENAME
 
 
 def output_root_for(output_dir: Path) -> str:
-    """Return the canonical output root used for manifest comparisons."""
     return str(output_dir.resolve())
 
 
-def query_key_for(query: CompiledQuery, site: Site, file_mode: FileMode) -> str:
-    """Return the manifest query key for compiled query/site/file mode."""
-    return f"{site.value}:{file_mode.value}:{query.compiled}"
+def query_key_for(query: CompiledQuery, site: Site) -> str:
+    return f"{site.value}:{query.compiled}"
 
 
 def prepare_manifest(config: FetchConfig, query: CompiledQuery) -> ManifestSession:
-    """Load or create manifest state according to continuation rules.
+    """Load or create manifest state.
 
-    Raises:
-        ManifestError: If existing manifest state conflicts with the requested run.
+    Existing manifests are always reusable. Without --resume, a search starts
+    from the beginning and skips already cached post/size files. With --resume,
+    the query cursor starts after the previous lowest post ID for that query.
     """
     manifest_path = manifest_path_for(config.output_dir)
     existing_manifest = load_manifest(manifest_path)
-    query_key = query_key_for(query, config.site, config.file_mode)
-    if existing_manifest is None:
-        manifest = create_empty_manifest(config)
+    query_key = query_key_for(query, config.site)
+    manifest_found = existing_manifest is not None
+    manifest = create_empty_manifest(config) if existing_manifest is None else normalize_manifest(existing_manifest, config.output_dir)
+    _assert_same_output(manifest, config.output_dir)
+    if query_key not in queries_map(manifest):
         add_query_state(manifest, query_key, config, query)
-        return ManifestSession(
-            manifest=manifest,
-            manifest_path=manifest_path,
-            query_key=query_key,
-            start_status=ManifestStartStatus.NEW,
-            manifest_found=False,
-            starting_page=1,
-            starting_downloaded_count=0,
-            requested_limit=config.limit,
-        )
-
-    if not config.continue_existing and config.resume_mode is None and not config.force_new:
-        raise ManifestError(
-            f"Found {manifest_path}. Use --continue, --resume-mode merge, or --force-new."
-        )
-
-    normalized_manifest = normalize_manifest(existing_manifest, config.output_dir)
-    _assert_same_output(normalized_manifest, config.output_dir)
-
-    if config.force_new:
-        manifest = create_empty_manifest(config)
-        add_query_state(manifest, query_key, config, query)
-        return ManifestSession(
-            manifest=manifest,
-            manifest_path=manifest_path,
-            query_key=query_key,
-            start_status=ManifestStartStatus.FORCE_NEW,
-            manifest_found=True,
-            starting_page=1,
-            starting_downloaded_count=0,
-            requested_limit=config.limit,
-        )
-
-    if config.resume_mode is ResumeMode.MERGE:
-        queries = _required_dict(normalized_manifest, "queries", "manifest")
-        if query_key not in queries:
-            add_query_state(normalized_manifest, query_key, config, query)
-            starting_downloaded_count = 0
-            starting_page = 1
-            requested_limit = config.limit
+    state = query_state(manifest, query_key)
+    if config.continue_existing:
+        state["complete"] = False
+        starting_downloaded_count = _required_int(state, "downloaded_count", f"queries.{query_key}")
+        if config.limit is None:
+            state["requested_limit"] = None
         else:
-            requested_limit = _update_requested_limit(queries[query_key], config.limit)
-            starting_downloaded_count = _required_int(
-                queries[query_key],
-                "downloaded_count",
-                f"queries.{query_key}",
-            )
-            starting_page = _required_int(queries[query_key], "last_page", f"queries.{query_key}") + 1
-        return ManifestSession(
-            manifest=normalized_manifest,
-            manifest_path=manifest_path,
-            query_key=query_key,
-            start_status=ManifestStartStatus.MERGE,
-            manifest_found=True,
-            starting_page=starting_page,
-            starting_downloaded_count=starting_downloaded_count,
-            requested_limit=requested_limit,
-        )
-
-    queries = _required_dict(normalized_manifest, "queries", "manifest")
-    if query_key not in queries:
-        raise ManifestError(
-            f"Found {manifest_path}, but it does not contain the same compiled query: {query.compiled}"
-        )
-    state = _required_dict(queries, query_key, "manifest.queries")
-    requested_limit = _update_requested_limit(state, config.limit)
+            state["requested_limit"] = starting_downloaded_count + config.limit
+        start_status = ManifestStartStatus.RESUME
+    else:
+        reset_query_run_state(state, config.limit)
+        starting_downloaded_count = 0
+        start_status = ManifestStartStatus.NEW if not manifest_found else ManifestStartStatus.SEARCH
+        state["requested_limit"] = config.limit
     return ManifestSession(
-        manifest=normalized_manifest,
+        manifest=manifest,
         manifest_path=manifest_path,
         query_key=query_key,
-        start_status=ManifestStartStatus.CONTINUE,
-        manifest_found=True,
-        starting_page=_required_int(state, "last_page", f"queries.{query_key}") + 1,
-        starting_downloaded_count=_required_int(state, "downloaded_count", f"queries.{query_key}"),
-        requested_limit=requested_limit,
+        start_status=start_status,
+        manifest_found=manifest_found,
+        starting_downloaded_count=starting_downloaded_count,
+        requested_limit=state["requested_limit"],
     )
 
 
 def load_manifest(manifest_path: Path) -> dict[str, Any] | None:
-    """Load a manifest if it exists.
-
-    Raises:
-        ManifestError: If the manifest cannot be parsed as a JSON object.
-    """
     if not manifest_path.exists():
         return None
     with manifest_path.open("r", encoding="utf-8") as file:
@@ -166,38 +104,26 @@ def load_manifest(manifest_path: Path) -> dict[str, Any] | None:
 
 
 def normalize_manifest(manifest: dict[str, Any], output_dir: Path) -> dict[str, Any]:
-    """Normalize supported manifest schemas to v2.
-
-    Raises:
-        ManifestError: If the manifest schema or shape is unsupported.
-    """
     schema_version = _required_int(manifest, "schema_version", "manifest")
     if schema_version == MANIFEST_SCHEMA_VERSION:
-        return copy.deepcopy(manifest)
+        return json.loads(json.dumps(manifest))
+    if schema_version == 2:
+        return _normalize_v2_manifest(manifest, output_dir)
     if schema_version == 1:
-        return _normalize_v1_manifest(manifest, output_dir)
+        return _normalize_v2_manifest(_normalize_v1_manifest(manifest, output_dir), output_dir)
     raise ManifestError(f"Unsupported manifest schema_version: {schema_version}")
 
 
 def create_empty_manifest(config: FetchConfig) -> dict[str, Any]:
-    """Create an empty v2 manifest for a fetch output."""
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
-        "tool": {
-            "name": TOOL_NAME,
-            "version": TOOL_VERSION,
-        },
-        "sources": {
-            config.site.value: {
-                "base_url": config.site.base_url,
-            },
-        },
+        "tool": {"name": TOOL_NAME, "version": TOOL_VERSION},
+        "sources": {config.site.value: {"base_url": config.site.base_url}},
         "output": {
             "root": str(config.output_dir),
             "root_absolute": output_root_for(config.output_dir),
+            "json_dir": JSON_DIR_NAME,
             "image_dir": IMAGE_DIR_NAME,
-            "caption_dir": CAPTION_DIR_NAME,
-            "post_dir": POST_DIR_NAME,
             "filename_mode": "id",
         },
         "queries": {},
@@ -211,11 +137,7 @@ def add_query_state(
     config: FetchConfig,
     query: CompiledQuery,
 ) -> None:
-    """Add an empty query state to a manifest."""
-    queries = _required_dict(manifest, "queries", "manifest")
-    if query_key in queries:
-        raise ManifestError(f"Manifest already contains query state: {query_key}")
-    queries[query_key] = {
+    queries_map(manifest)[query_key] = {
         "key": query_key,
         "compiled": query.compiled,
         "raw_tags": list(query.raw_tags),
@@ -224,28 +146,31 @@ def add_query_state(
         "exclude_tags": list(query.exclude_tags),
         "rating": None if query.rating is None else query.rating.value,
         "site": config.site.value,
-        "file_mode": config.file_mode.value,
         "requested_limit": config.limit,
         "downloaded_count": 0,
-        "last_page": 0,
         "last_post_id": None,
         "complete": False,
         "seen_post_ids": [],
     }
 
 
-def query_state(manifest: dict[str, Any], query_key: str) -> dict[str, Any]:
-    """Return a query state from a manifest.
+def reset_query_run_state(state: dict[str, Any], requested_limit: int | None) -> None:
+    state["requested_limit"] = requested_limit
+    state["downloaded_count"] = 0
+    state["last_post_id"] = None
+    state["complete"] = False
+    state["seen_post_ids"] = []
 
-    Raises:
-        ManifestError: If the query state is missing or malformed.
-    """
-    queries = _required_dict(manifest, "queries", "manifest")
-    return _required_dict(queries, query_key, "manifest.queries")
+
+def query_state(manifest: dict[str, Any], query_key: str) -> dict[str, Any]:
+    return _required_dict(queries_map(manifest), query_key, "manifest.queries")
+
+
+def queries_map(manifest: dict[str, Any]) -> dict[str, Any]:
+    return _required_dict(manifest, "queries", "manifest")
 
 
 def posts_map(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Return the shared posts map from a manifest."""
     return _required_dict(manifest, "posts", "manifest")
 
 
@@ -255,21 +180,17 @@ def set_query_progress(
     requested_limit: int | None,
     seen_post_ids: list[int],
     last_post_id: int | None,
-    last_page: int,
     complete: bool,
 ) -> None:
-    """Persist query continuation progress into a manifest."""
     state = query_state(manifest, query_key)
     state["requested_limit"] = requested_limit
     state["downloaded_count"] = len(seen_post_ids)
-    state["last_page"] = last_page
     state["last_post_id"] = last_post_id
     state["complete"] = complete
     state["seen_post_ids"] = list(seen_post_ids)
 
 
 def save_manifest(manifest: dict[str, Any], manifest_path: Path) -> None:
-    """Atomically write a manifest as UTF-8 JSON."""
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = manifest_path.with_name(f".{manifest_path.name}.tmp")
     with temp_path.open("w", encoding="utf-8") as file:
@@ -278,111 +199,125 @@ def save_manifest(manifest: dict[str, Any], manifest_path: Path) -> None:
     temp_path.replace(manifest_path)
 
 
-def _normalize_v1_manifest(manifest: dict[str, Any], output_dir: Path) -> dict[str, Any]:
-    source = _required_dict(manifest, "source", "manifest")
-    output = _required_dict(manifest, "output", "manifest")
-    query = _required_dict(manifest, "query", "manifest")
-    continuation = _required_dict(manifest, "continuation", "manifest")
-    site = Site.from_value(_required_str(source, "site", "source"))
-    file_mode = FileMode.from_value(_required_str(output, "file_mode", "output"))
-    compiled_query = _required_str(query, "compiled", "query")
-    query_key = f"{site.value}:{file_mode.value}:{compiled_query}"
-    normalized = {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
-        "tool": copy.deepcopy(_required_dict(manifest, "tool", "manifest")),
-        "sources": {
-            site.value: {
-                "base_url": _required_str(source, "base_url", "source"),
+def post_entry(post_id: int) -> dict[str, Any]:
+    return {
+        "id": str(post_id),
+        "file_paths": {
+            "json": f"{JSON_DIR_NAME}/{post_id:0{FILENAME_WIDTH}d}.json",
+            "image_paths": {
+                FileMode.PREVIEW.value: None,
+                FileMode.SAMPLE.value: None,
+                FileMode.ORIGINAL.value: None,
             },
         },
+    }
+
+
+def image_relative_path(post_id: int, file_mode: FileMode, extension: str) -> str:
+    return f"{IMAGE_DIR_NAME}/{file_mode.value}/{post_id:0{FILENAME_WIDTH}d}.{extension}"
+
+
+def json_relative_path(post_id: int) -> str:
+    return f"{JSON_DIR_NAME}/{post_id:0{FILENAME_WIDTH}d}.json"
+
+
+def _normalize_v2_manifest(manifest: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+    normalized = create_empty_manifest(_config_from_manifest(manifest, output_dir))
+    normalized["queries"] = json.loads(json.dumps(manifest.get("queries", {})))
+    posts = _required_dict(manifest, "posts", "manifest")
+    for post_id_text, record in posts.items():
+        if not isinstance(record, dict):
+            raise ManifestError(f"manifest.posts.{post_id_text} must be an object")
+        post_id = _post_id_from_text(post_id_text)
+        entry = post_entry(post_id)
+        file_paths = _required_dict(entry, "file_paths", f"posts.{post_id}")
+        image_paths = _required_dict(file_paths, "image_paths", f"posts.{post_id}.file_paths")
+        if "file_paths" in record:
+            existing_paths = _required_dict(record, "file_paths", f"posts.{post_id}")
+            file_paths["json"] = _required_str(existing_paths, "json", f"posts.{post_id}.file_paths")
+            existing_images = _required_dict(existing_paths, "image_paths", f"posts.{post_id}.file_paths")
+            for mode in image_paths:
+                value = existing_images.get(mode)
+                image_paths[mode] = value if isinstance(value, str) else None
+        else:
+            for legacy_key in ("rating", "md5", "caption"):
+                if legacy_key in record:
+                    entry[legacy_key] = json.loads(json.dumps(record[legacy_key]))
+            if "post" in record and isinstance(record["post"], dict) and isinstance(record["post"].get("path"), str):
+                file_paths["json"] = record["post"]["path"]
+            files = record.get("files")
+            if isinstance(files, dict):
+                for mode, file_record in files.items():
+                    if mode in image_paths and isinstance(file_record, dict) and isinstance(file_record.get("path"), str):
+                        image_paths[mode] = file_record["path"]
+        normalized["posts"][str(post_id)] = entry
+    return normalized
+
+
+def _normalize_v1_manifest(manifest: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+    # The old v1 shape is close enough to v2 for the v2 normalizer after
+    # lifting its single file record into posts.*.files.
+    output = _required_dict(manifest, "output", "manifest")
+    file_mode = FileMode.from_value(_required_str(output, "file_mode", "output"))
+    posts = _required_dict(manifest, "posts", "manifest")
+    lifted_posts: dict[str, Any] = {}
+    for post_id_text, record in posts.items():
+        if not isinstance(record, dict):
+            raise ManifestError(f"manifest.posts.{post_id_text} must be an object")
+        post_id = _required_int(record, "id", f"posts.{post_id_text}")
+        lifted = json.loads(json.dumps(record))
+        if "file" in lifted:
+            lifted["files"] = {file_mode.value: lifted.pop("file")}
+        lifted["post"] = {"path": json_relative_path(post_id)}
+        lifted_posts[str(post_id)] = lifted
+    return {
+        "schema_version": 2,
+        "tool": manifest.get("tool", {"name": TOOL_NAME, "version": TOOL_VERSION}),
+        "sources": {"e621": {"base_url": Site.E621.base_url}},
         "output": {
             "root": str(output_dir),
             "root_absolute": output_root_for(output_dir),
             "image_dir": IMAGE_DIR_NAME,
-            "caption_dir": CAPTION_DIR_NAME,
-            "post_dir": POST_DIR_NAME,
-            "filename_mode": "id",
+            "post_dir": JSON_DIR_NAME,
         },
-        "queries": {
-            query_key: {
-                "key": query_key,
-                "compiled": compiled_query,
-                "raw_tags": _required_list(query, "raw_args", "query"),
-                "artist_tags": _required_list(query, "authors", "query"),
-                "or_tags": [],
-                "exclude_tags": _required_list(query, "exclude", "query"),
-                "rating": _normalize_v1_rating(query),
-                "site": site.value,
-                "file_mode": file_mode.value,
-                "requested_limit": _required_nullable_int(continuation, "requested_limit", "continuation"),
-                "downloaded_count": _required_int(continuation, "downloaded_count", "continuation"),
-                "last_page": _required_int(continuation, "last_page", "continuation"),
-                "last_post_id": _required_nullable_int(continuation, "last_post_id", "continuation"),
-                "complete": _required_bool(continuation, "complete", "continuation"),
-                "seen_post_ids": _required_list(continuation, "seen_post_ids", "continuation"),
-            },
-        },
-        "posts": _normalize_v1_posts(_required_dict(manifest, "posts", "manifest"), file_mode),
+        "queries": {},
+        "posts": lifted_posts,
     }
-    return normalized
 
 
-def _normalize_v1_posts(posts: dict[str, Any], file_mode: FileMode) -> dict[str, Any]:
-    normalized_posts: dict[str, Any] = {}
-    for post_id, post_record in posts.items():
-        if not isinstance(post_record, dict):
-            raise ManifestError(f"manifest.posts.{post_id} must be an object")
-        normalized_record = copy.deepcopy(post_record)
-        post_identifier = _required_int(normalized_record, "id", f"posts.{post_id}")
-        file_record = copy.deepcopy(_required_dict(normalized_record, "file", f"posts.{post_id}"))
-        normalized_record.pop("file")
-        normalized_record["files"] = {
-            file_mode.value: file_record,
-        }
-        normalized_record["post"] = {
-            "path": f"{POST_DIR_NAME}/{post_identifier:0{FILENAME_WIDTH}d}.json",
-        }
-        normalized_posts[str(post_identifier)] = normalized_record
-    return normalized_posts
-
-
-def _normalize_v1_rating(query: dict[str, Any]) -> str | None:
-    rating = _required_dict(query, "rating", "query")
-    if "e621" not in rating:
-        raise ManifestError("query.rating is missing required key: e621")
-    value = rating["e621"]
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ManifestError("query.rating.e621 must be a string or null")
-    return value
+def _config_from_manifest(manifest: dict[str, Any], output_dir: Path) -> FetchConfig:
+    sources = manifest.get("sources")
+    site = Site.E621
+    if isinstance(sources, dict) and sources:
+        site = Site.from_value(sorted(sources)[0])
+    return FetchConfig(
+        tags=(),
+        output_dir=output_dir,
+        limit=None,
+        rating=None,
+        artist_tags=(),
+        or_tags=(),
+        exclude_tags=(),
+        site=site,
+        file_mode=FileMode.SAMPLE,
+        continue_existing=False,
+        dry_run=False,
+        validate_tags=False,
+    )
 
 
 def _assert_same_output(manifest: dict[str, Any], output_dir: Path) -> None:
     output = _required_dict(manifest, "output", "manifest")
-    root_absolute = _required_str(output, "root_absolute", "output")
-    current_root = output_root_for(output_dir)
-    if root_absolute != current_root:
-        raise ManifestError(
-            f"Manifest output root is {root_absolute}, but command output root is {current_root}"
-        )
+    root_absolute = output.get("root_absolute")
+    if isinstance(root_absolute, str) and root_absolute != output_root_for(output_dir):
+        output["root_absolute"] = output_root_for(output_dir)
+        output["root"] = str(output_dir)
 
 
-def _update_requested_limit(state: Any, requested_limit: int | None) -> int | None:
-    if not isinstance(state, dict):
-        raise ManifestError("query state must be an object")
-    existing_limit = _required_nullable_int(state, "requested_limit", "query")
-    if requested_limit is None:
-        if existing_limit is not None:
-            state["complete"] = False
-        state["requested_limit"] = None
-        return None
-    if existing_limit is None:
-        return None
-    if requested_limit > existing_limit:
-        state["requested_limit"] = requested_limit
-        return requested_limit
-    return existing_limit
+def _post_id_from_text(value: str) -> int:
+    if not value.isdigit():
+        raise ManifestError(f"manifest.posts contains a non-numeric post id: {value}")
+    return int(value)
 
 
 def _required_dict(mapping: dict[str, Any], key: str, context: str) -> dict[str, Any]:
@@ -392,15 +327,6 @@ def _required_dict(mapping: dict[str, Any], key: str, context: str) -> dict[str,
     if not isinstance(value, dict):
         raise ManifestError(f"{context}.{key} must be an object")
     return value
-
-
-def _required_list(mapping: dict[str, Any], key: str, context: str) -> list[Any]:
-    if key not in mapping:
-        raise ManifestError(f"{context} is missing required key: {key}")
-    value = mapping[key]
-    if not isinstance(value, list):
-        raise ManifestError(f"{context}.{key} must be a list")
-    return copy.deepcopy(value)
 
 
 def _required_str(mapping: dict[str, Any], key: str, context: str) -> str:
@@ -418,24 +344,4 @@ def _required_int(mapping: dict[str, Any], key: str, context: str) -> int:
     value = mapping[key]
     if isinstance(value, bool) or not isinstance(value, int):
         raise ManifestError(f"{context}.{key} must be an integer")
-    return value
-
-
-def _required_nullable_int(mapping: dict[str, Any], key: str, context: str) -> int | None:
-    if key not in mapping:
-        raise ManifestError(f"{context} is missing required key: {key}")
-    value = mapping[key]
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ManifestError(f"{context}.{key} must be an integer or null")
-    return value
-
-
-def _required_bool(mapping: dict[str, Any], key: str, context: str) -> bool:
-    if key not in mapping:
-        raise ManifestError(f"{context} is missing required key: {key}")
-    value = mapping[key]
-    if not isinstance(value, bool):
-        raise ManifestError(f"{context}.{key} must be a boolean")
     return value

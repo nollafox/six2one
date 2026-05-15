@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,7 +46,7 @@ class CliTests(unittest.TestCase):
             parse_fetch_config(("prune", "--help"))
 
         help_text = stdout.getvalue()
-        self.assertIn("Remove incomplete image/caption/post sibling sets", help_text)
+        self.assertIn("Remove manifest entries with incomplete cached files", help_text)
         self.assertIn("Prune creates missing output directories", help_text)
         self.assertEqual(stderr.getvalue(), "")
 
@@ -222,10 +223,34 @@ class CliTests(unittest.TestCase):
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
-            (output_dir / "images").mkdir()
-            (output_dir / "captions").mkdir()
-            (output_dir / "posts").mkdir()
-            (output_dir / "images" / "000000000001.jpg").write_bytes(b"image")
+            (output_dir / "images" / "sample").mkdir(parents=True)
+            (output_dir / "json").mkdir()
+            (output_dir / "images" / "sample" / "000000000001.jpg").write_bytes(b"image")
+            (output_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "tool": {"name": "six2one", "version": "0.1.2"},
+                        "sources": {"e621": {"base_url": "https://e621.net"}},
+                        "output": {"root": str(output_dir), "root_absolute": str(output_dir.resolve())},
+                        "queries": {"e621:fox": {"seen_post_ids": [1], "downloaded_count": 1}},
+                        "posts": {
+                            "1": {
+                                "id": "1",
+                                "file_paths": {
+                                    "json": "json/000000000001.json",
+                                    "image_paths": {
+                                        "preview": None,
+                                        "sample": "images/sample/000000000001.jpg",
+                                        "original": None,
+                                    },
+                                },
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 exit_code = asyncio.run(main(("prune", str(output_dir))))
 

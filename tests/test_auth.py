@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from six2one.auth import delete_login, find_project_root, load_login, login_path, request_headers, save_login
 from six2one.errors import UsageError
+from six2one.models import TOOL_NAME, TOOL_VERSION
 
 
 class AuthTests(unittest.TestCase):
@@ -91,7 +92,7 @@ class AuthTests(unittest.TestCase):
 
             self.assertEqual(headers["Accept-Encoding"], "gzip, deflate")
             self.assertEqual(headers["Authorization"], f"Basic {expected_token}")
-            self.assertEqual(headers["User-Agent"], "six2one/0.1.2 (by hexerade on e621)")
+            self.assertEqual(headers["User-Agent"], f"{TOOL_NAME}/{TOOL_VERSION} (by hexerade on e621)")
 
     def test_anonymous_headers_disable_brotli(self) -> None:
         headers = request_headers(None)

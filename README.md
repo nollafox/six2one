@@ -114,7 +114,7 @@ Enrichment is cached by post, not by query. Once six2one has comments for post `
 The first time a query needs a piece of data, six2one fetches it from e621. After that the data is local, and the next query that needs it reads from the cache instead of the network. Broad fetches fill the archive, narrower queries carve it, and exports turn matching downloaded posts into portable folders — none of it re-fetching what is already on disk.
 
 <p align="center">
-  <img src="https://github.com/nollafox/six2one/raw/main/docs/flowchart.png" alt="six2one banner" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12); max-width: 100%; height: auto;">
+  <img src="https://github.com/nollafox/six2one/blob/main/docs/flowchart.png?raw=true" alt="six2one flowchart" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12); max-width: 100%; height: auto;">
 </p>
 
 A single run moves through the same stages, from a raw query to files on disk:

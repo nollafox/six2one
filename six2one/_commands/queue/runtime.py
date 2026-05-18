@@ -67,6 +67,10 @@ def run_jobs(
         attempted += 1
         if record.state is JobState.FAILED and retry_failed:
             restored += 1
+        _mark_running(storage, record.id)
+        refreshed = storage.queue.get(record.id)
+        if refreshed is not None:
+            record = refreshed
 
         job = registry.create(record.kind)
         try:
@@ -126,6 +130,21 @@ def _runnable_jobs(
     if image_only:
         records = [record for record in records if record.kind == JobKind.DOWNLOAD_IMAGE.value]
     return records
+
+
+def _mark_running(storage: Storage, job_id: str) -> None:
+    storage.database.execute(
+        """
+        UPDATE queue_jobs
+        SET state = ?,
+            started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+            attempts = attempts + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (JobState.RUNNING.value, job_id),
+    )
+    storage.database.commit()
 
 
 def human_bytes(size: int) -> str:

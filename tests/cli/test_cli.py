@@ -10,7 +10,7 @@ import pytest
 
 from six2one._commands.export.command import ExportResult
 from six2one._commands.fetch.command import FetchCommandResult, FetchDiscoverySummary, FetchDownloadSummary
-from six2one._commands.queue.command import QueueCommandResult, QueueRunSummary
+from six2one._commands.queue.command import QueueAmendResult, QueueCommandResult, QueueRunSummary
 from six2one.cli import main
 
 
@@ -34,6 +34,7 @@ def test_fetch_help_keeps_limit_and_removes_legacy_options():
 
     assert result.exit_code == 0
     assert "--limit" in result.stdout
+    assert "omit to process every" in result.stdout
     assert "--file-type" in result.stdout
     assert "default: original" in result.stdout
     assert "--queue" in result.stdout
@@ -52,7 +53,10 @@ def test_queue_help_describes_management_commands():
     assert result.exit_code == 0
     assert "queue list" in result.stdout
     assert "queue clear --failed --yes" in result.stdout
+    assert "queue amend" in result.stdout
+    assert "--exclude" in result.stdout
     assert "--limit" in result.stdout
+    assert "omit to process every" in result.stdout
     assert result.stderr == ""
 
 
@@ -79,6 +83,44 @@ def test_queue_dispatches_to_new_command():
     assert run.call_args.args[1] == "dragon rating:s"
     assert run.call_args.kwargs["limit"] == 1
     assert "six2one queue" in result.stdout
+    assert result.stderr == ""
+
+
+def test_fetch_without_limit_crawls_all_pages_by_default():
+    with patch("six2one.cli.run_fetch", return_value=_fetch_result()) as run:
+        result = _run_cli("fetch", "dragon rating:s")
+
+    assert result.exit_code == 0
+    assert run.call_args.kwargs["limit"] is None
+
+
+def test_queue_without_limit_crawls_all_pages_by_default():
+    with patch("six2one.cli.run_queue", return_value=_queue_result()) as run:
+        result = _run_cli("queue", "dragon rating:s")
+
+    assert result.exit_code == 0
+    assert run.call_args.kwargs["limit"] is None
+
+
+def test_queue_amend_dispatches_to_new_command():
+    command_result = QueueAmendResult(
+        source_run_id="q_test",
+        exclude="young",
+        original_query="dragon rating:s",
+        amended_query="dragon rating:s -( young )",
+        removed_image_jobs=1,
+        pending_removed=1,
+        remaining_image_jobs=2,
+    )
+
+    with patch("six2one.cli.run_queue_amend", return_value=command_result) as run:
+        result = _run_cli("queue", "amend", "q_test", "--exclude", "young")
+
+    assert result.exit_code == 0
+    run.assert_called_once()
+    assert run.call_args.args[1] == "q_test"
+    assert run.call_args.kwargs["exclude"] == "young"
+    assert "Source run amended." in result.stdout
     assert result.stderr == ""
 
 

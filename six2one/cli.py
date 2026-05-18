@@ -15,16 +15,17 @@ from ._commands.config import SixTwoOneConfig
 from ._commands.errors import CommandError
 from ._commands.fetch import format_fetch_queue_result, format_fetch_result, run_fetch, run_fetch_queue
 from ._commands.queue import (
+    format_queue_amend_result,
     format_queue_clear_preview,
     format_queue_clear_result,
     format_queue_list,
     format_queue_result,
     run_queue,
+    run_queue_amend,
     run_queue_clear,
     run_queue_list,
 )
 from .models import (
-    DEFAULT_FETCH_LIMIT,
     FileMode,
     Site,
     TOOL_VERSION,
@@ -52,6 +53,7 @@ OPTIONS_REQUIRING_VALUE = {
     "--limit",
     "--out",
     "--size",
+    "--exclude",
     "--file-type",
 }
 SHORT_OPTIONS_WITH_ATTACHED_VALUES = ("-n", "-o")
@@ -95,6 +97,7 @@ Examples:
   {prog} queue list
   {prog} queue list --failed
   {prog} queue clear --failed --yes
+  {prog} queue amend q_01HXW6T2KZ9A --exclude "young"
 """
 EXPORT_DESCRIPTION = """Export downloaded images and cached post JSON matching a query."""
 EXPORT_EPILOG = """
@@ -188,8 +191,8 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
         "--limit",
         type=int,
         metavar="N",
-        default=DEFAULT_FETCH_LIMIT,
-        help=f"maximum number of posts to discover; default: {DEFAULT_FETCH_LIMIT}",
+        default=None,
+        help="maximum number of posts to discover; omit to process every page",
     )
     fetch_parser.add_argument(
         "--file-type",
@@ -237,7 +240,7 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
     queue_parser = subparsers.add_parser(
         QUEUE_COMMAND,
         help="discover and enqueue query work",
-        usage=f"{prog} queue [QUERY | list | clear [TARGET]] [options]",
+        usage=f"{prog} queue [QUERY | list | clear [TARGET] | amend SOURCE_RUN --exclude QUERY] [options]",
         description=textwrap.dedent(QUEUE_DESCRIPTION).strip(),
         epilog=textwrap.dedent(QUEUE_EPILOG).strip().format(prog=prog),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -247,15 +250,15 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
         "queue_args",
         nargs="*",
         metavar="QUERY",
-        help="query to queue, or one of: list, clear",
+        help="query to queue, or one of: list, clear, amend",
     )
     queue_parser.add_argument(
         "-n",
         "--limit",
         type=int,
-        default=DEFAULT_FETCH_LIMIT,
+        default=None,
         metavar="N",
-        help=f"maximum number of posts to discover; default: {DEFAULT_FETCH_LIMIT}",
+        help="maximum number of posts to discover; omit to process every page",
     )
     queue_parser.add_argument(
         "--size",
@@ -264,6 +267,11 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
         dest="image_variant",
         metavar="MODE",
         help="image variant to enqueue: preview, sample, or original; default: original",
+    )
+    queue_parser.add_argument(
+        "--exclude",
+        metavar="QUERY",
+        help="with amend, fold this exclusion into the source run and remove matching image jobs",
     )
     queue_parser.add_argument(
         "--failed",
@@ -365,11 +373,15 @@ def _run_queue_command(namespace: argparse.Namespace) -> int:
     if action == "list":
         if len(args) > 1:
             raise CommandError("queue list does not take a query")
+        if namespace.exclude:
+            raise CommandError("--exclude can only be used with queue amend")
         result = run_queue_list(config, failed=namespace.failed, compact=namespace.compact)
         sys.stdout.write(format_queue_list(result) + "\n")
         return 0
 
     if action == "clear":
+        if namespace.exclude:
+            raise CommandError("--exclude can only be used with queue amend")
         target = " ".join(args[1:]) or None
         result = run_queue_clear(config, target=target, failed=namespace.failed, yes=namespace.yes)
         if namespace.yes:
@@ -378,12 +390,27 @@ def _run_queue_command(namespace: argparse.Namespace) -> int:
             sys.stdout.write(format_queue_clear_preview(result) + "\n")
         return 0
 
+    if action == "amend":
+        if len(args) != 2:
+            raise CommandError("queue amend requires a source run id")
+        if namespace.failed:
+            raise CommandError("--failed can only be used with queue list or queue clear")
+        if namespace.compact:
+            raise CommandError("--compact can only be used with queue list")
+        if namespace.yes:
+            raise CommandError("--yes can only be used with queue clear")
+        result = run_queue_amend(config, args[1], exclude=namespace.exclude or "")
+        sys.stdout.write(format_queue_amend_result(result) + "\n")
+        return 0
+
     if namespace.failed:
         raise CommandError("--failed can only be used with queue list or queue clear")
     if namespace.compact:
         raise CommandError("--compact can only be used with queue list")
     if namespace.yes:
         raise CommandError("--yes can only be used with queue clear")
+    if namespace.exclude:
+        raise CommandError("--exclude can only be used with queue amend")
 
     query = _query_from_parts(args, command="queue")
     result = run_queue(
@@ -397,7 +424,7 @@ def _run_queue_command(namespace: argparse.Namespace) -> int:
 
 def _limit_from_value(value: int | None) -> int | None:
     if value is None:
-        return DEFAULT_FETCH_LIMIT
+        return None
     if value < 0:
         raise CommandError("--limit must be zero or greater")
     if value == 0:

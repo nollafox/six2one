@@ -127,7 +127,7 @@ class QueryEvaluator:
             return False
 
         for term in scope.required:
-            matched = self._node(term.node, post)
+            matched = self._term(term, post)
             if term.occurrence is Occurrence.PROHIBITED:
                 if matched:
                     return False
@@ -135,17 +135,23 @@ class QueryEvaluator:
                 return False
 
         if scope.loose_or is not None:
-            if not any(self._node(term.node, post) for term in scope.loose_or.entries):
+            if not any(self._term(term, post) for term in scope.loose_or.entries):
                 return False
 
         return True
+
+    def _term(self, term: Any, post: Mapping[str, Any]) -> bool:
+        node = term.node
+        if isinstance(node, TagPredicate) and term.occurrence is Occurrence.PROHIBITED:
+            return _tag_predicate(node, post, closure="negative")
+        return self._node(node, post)
 
     def _node(self, node: Any, post: Mapping[str, Any]) -> bool:
         kind = getattr(node, "kind", "")
         if isinstance(node, ScopeExpr) or kind == "Scope":
             return self._scope(node, post)
         if isinstance(node, TagPredicate):
-            return _tag_predicate(node, post)
+            return _tag_predicate(node, post, closure="positive")
         if isinstance(node, WildcardPredicate):
             return _wildcard_predicate(node, post)
         if isinstance(node, NumericFieldPredicate):
@@ -293,9 +299,10 @@ def _tag_set_materialized(ref: Any, fallback: str | None = None) -> set[str]:
     return {fallback.lower()} if fallback else set()
 
 
-def _tag_predicate(node: TagPredicate, post: Mapping[str, Any]) -> bool:
+def _tag_predicate(node: TagPredicate, post: Mapping[str, Any], *, closure: str) -> bool:
     tags = _all_tags(post)
-    wanted = _tag_set_materialized(node.positive_search_closure, node.canonical)
+    ref = node.negative_exclusion_closure if closure == "negative" else node.positive_search_closure
+    wanted = _tag_set_materialized(ref, node.canonical)
     return bool(tags & wanted)
 
 
@@ -481,6 +488,10 @@ def _relation(node: RelationPredicate, post: Mapping[str, Any]) -> bool:
     if node.relation is RelationKind.PARENT:
         return _id_or_any(parent_id, node.value)
     if node.relation is RelationKind.CHILD:
+        if node.value == "none":
+            return not children
+        if node.value == "any":
+            return bool(children)
         return any(_id_or_any(child, node.value) for child in children)
     return False
 

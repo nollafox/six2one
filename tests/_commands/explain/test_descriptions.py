@@ -1,5 +1,7 @@
 from six2one._commands.explain import Explain
 from six2one._commands.explain.command import _pretty_values
+from six2one.query import E621QueryLanguage
+from tests.query.test_query_spec_coverage import FakeTagDatabase
 
 
 def test_explain_payload_includes_natural_language_description():
@@ -7,10 +9,10 @@ def test_explain_payload_includes_natural_language_description():
 
     description = result.as_dict()["natural_language_description"]
 
-    assert "The post must have tag `dragon`" in description
+    assert "The post must match `dragon`" in description
     assert "rating is safe" in description
     assert "score is greater than 10" in description
-    assert "Deleted posts are hidden by default" in description
+    assert "Deleted posts are hidden by default" in " ".join(result.as_dict()["natural_language_notes"])
     assert "At most 25 posts are requested" in description
     assert "[bold" not in description
 
@@ -20,11 +22,28 @@ def test_pretty_values_render_meaning_section_lines():
 
     values = _pretty_values(result)
 
-    assert "At least one loose-OR entry must match:" in values["natural_language_description"]
+    assert "Inside the group, the post only needs to match one option:" in values["natural_language_description"]
     assert "cat" in values["natural_language_description"]
     assert "tiger" in values["natural_language_description"]
     assert "Posts with tag" in values["natural_language_description"]
     assert "young" in values["natural_language_description"]
+
+
+def test_pretty_values_render_tag_matching_section_from_bound_closures():
+    result = Explain(language=E621QueryLanguage(tag_database=FakeTagDatabase())).run("cat ( ~breasts ~huge_breasts )")
+
+    values = _pretty_values(result)
+
+    assert "1. The post must match" in values["natural_language_description"]
+    assert "Inside the group, the post only needs to match one option:" in values["natural_language_description"]
+    assert "loose-OR" not in values["natural_language_description"]
+    assert "predicate" not in values["natural_language_description"]
+    assert "cat → domestic_cat" in values["tag_matching"]
+    assert "because" in values["tag_matching"]
+    assert "is an alias" in values["tag_matching"]
+    assert "tabby_cat" in values["tag_matching"]
+    assert "breasts" in values["tag_matching"]
+    assert "hyper_breasts" in values["tag_matching"]
 
 
 def test_description_calls_out_literal_parentheses_without_reparsing_them():

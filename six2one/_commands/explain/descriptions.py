@@ -22,6 +22,7 @@ from six2one.query.ast import (
     RatioInput,
     RelativePeriodDateValue,
     ScopeExpr,
+    TagPredicate,
     UserId,
     UserName,
     YesterAgoDateValue,
@@ -59,46 +60,48 @@ class QueryDescriptionBuilder:
     markup: bool = False
 
     def build(self) -> NaturalLanguageDescription:
-        lines = ["Read literally, this query means:"]
+        lines: list[str] = []
         notes = _literal_parenthesis_notes(self.root, markup=self.markup)
 
         filter_lines = self._scope_lines(self.root, label=None)
         if filter_lines:
-            lines.extend(filter_lines)
+            lines.extend(f"{index}. {line}" for index, line in enumerate(filter_lines, start=1))
         else:
-            lines.append("No explicit filters were provided, so the result set is controlled only by default options.")
+            lines.append("1. No explicit filters were provided, so the result set is controlled only by default options.")
 
         if self.root.status is None:
-            lines.append("Deleted posts are hidden by default.")
-        lines.extend(self._option_lines())
+            notes.append("Deleted posts are hidden by default.")
+        start = len(lines) + 1
+        lines.extend(f"{index}. {line}" for index, line in enumerate(self._option_lines(), start=start))
         return NaturalLanguageDescription(tuple(lines), tuple(notes))
 
-    def _scope_lines(self, scope: ScopeExpr, *, label: str | None) -> list[str]:
+    def _scope_lines(self, scope: ScopeExpr, *, label: str | None, nested: bool = False) -> list[str]:
         lines: list[str] = []
-        if label is not None:
-            lines.append(f"{label} must also be true.")
 
         if scope.status is not None:
             status = scope.status
             if status.contributes_predicate:
                 lines.append(f"Posts must have status {status.value.value}.")
             else:
-                lines.append(f"status:{status.value.value} does not add a status predicate.")
+                lines.append(f"The search includes posts with any status because status:{status.value.value} was used.")
             if status.suppresses_implicit_deleted_filter:
-                lines.append(f"status:{status.value.value} suppresses the implicit deleted-post filter.")
+                lines.append(f"Deleted posts are no longer hidden automatically because status:{status.value.value} was used.")
 
         if scope.loose_or is not None:
             labels = [_node_phrase(term.node, markup=self.markup) for term in scope.loose_or.entries]
             joined = _join_or(labels)
-            lines.append(f"At least one loose-OR entry must match: {joined}.")
+            if nested:
+                lines.append(f"Inside the group, the post only needs to match one option: {joined}.")
+            else:
+                lines.append(f"The post only needs to match one option: {joined}.")
             for term in scope.loose_or.entries:
                 if getattr(term.node, "kind", None) == "WildcardPredicate" and term.node.suppressed_expansion:
-                    lines.append(f"{term.node.pattern} is treated as a literal loose-OR tag-like term because ~ suppresses wildcard expansion.")
+                    lines.append(f"{term.node.pattern} is treated as a literal tag-like term because ~ prevents wildcard expansion.")
 
         for term in scope.required:
             node = term.node
             if getattr(node, "kind", None) == "Scope":
-                lines.extend(self._scope_lines(node, label="The parenthesized group"))
+                lines.extend(self._scope_lines(node, label=None, nested=True))
                 continue
             lines.append(_term_sentence(term, markup=self.markup))
 
@@ -114,7 +117,7 @@ class QueryDescriptionBuilder:
         else:
             lines.append(f"Results are ordered by {order_field}, {direction}.")
         if self.options.default_order_applied:
-            lines.append("No order was specified, so results use e621's default newest-first order.")
+            pass
         if self.options.limit is not None:
             lines.append(f"At most {self.options.limit.value} posts are requested.")
         if self.options.rand_seed is not None:
@@ -126,6 +129,60 @@ class QueryDescriptionBuilder:
 
 def describe_query(root: ScopeExpr, options: Any, *, markup: bool = False) -> NaturalLanguageDescription:
     return QueryDescriptionBuilder(root=root, options=options, markup=markup).build()
+
+
+@dataclass(frozen=True, slots=True)
+class TagMatchingEntry:
+    raw: str
+    canonical: str
+    alias_applied: bool
+    alias_from: str | None
+    alias_to: str | None
+    direct: tuple[str, ...]
+    examples: tuple[str, ...]
+    remaining_count: int = 0
+
+
+def tag_matching_entries(root: ScopeExpr) -> tuple[TagMatchingEntry, ...]:
+    entries: list[TagMatchingEntry] = []
+    seen: set[str] = set()
+
+    def add(node: TagPredicate) -> None:
+        key = node.raw
+        if key in seen:
+            return
+        seen.add(key)
+        names = tuple(node.positive_search_closure.materialized or (node.canonical,))
+        examples = tuple(name for name in names if name != node.canonical)[:3]
+        remaining_count = max(0, len(tuple(name for name in names if name != node.canonical)) - len(examples))
+        entries.append(
+            TagMatchingEntry(
+                raw=node.raw,
+                canonical=node.canonical,
+                alias_applied=node.resolution.alias_applied,
+                alias_from=node.resolution.alias_from,
+                alias_to=node.resolution.alias_to,
+                direct=(node.canonical,),
+                examples=examples,
+                remaining_count=remaining_count,
+            )
+        )
+
+    def visit(scope: ScopeExpr) -> None:
+        if scope.loose_or is not None:
+            for term in scope.loose_or.entries:
+                if isinstance(term.node, TagPredicate):
+                    add(term.node)
+                elif getattr(term.node, "kind", None) == "Scope":
+                    visit(term.node)
+        for term in scope.required:
+            if isinstance(term.node, TagPredicate):
+                add(term.node)
+            elif getattr(term.node, "kind", None) == "Scope":
+                visit(term.node)
+
+    visit(root)
+    return tuple(entries)
 
 
 def _literal_parenthesis_notes(root: ScopeExpr, *, markup: bool) -> list[str]:
@@ -185,7 +242,7 @@ def _term_sentence(term: Any, *, markup: bool) -> str:
     if occurrence == "prohibited":
         return _negative_sentence(node, markup=markup)
     if occurrence == "loose":
-        return f"A loose-OR term can match {_node_phrase(node, markup=markup)}."
+        return f"The post can match {_node_phrase(node, markup=markup)}."
     return _positive_sentence(node, markup=markup)
 
 
@@ -193,14 +250,14 @@ def _positive_sentence(node: Any, *, markup: bool) -> str:
     kind = getattr(node, "kind", None)
     if kind == "TagPredicate":
         tag = _query_code(node.canonical, markup=markup)
-        return f"The post must have tag {tag}. More-specific tags that imply {tag} can also match."
+        return f"The post must match {tag}. More-specific tags that imply {tag} can also match."
     if kind == "WildcardPredicate":
         if node.suppressed_expansion:
-            return f"Posts must match the literal wildcard-like tag {node.pattern}; wildcard expansion is suppressed."
-        return f"Posts must match tags expanded from wildcard pattern {node.pattern}, up to e621's top 40 matches."
+            return f"Posts must match the literal tag-like text {node.pattern}; ~ prevents wildcard expansion."
+        return f"The post must match one of the tags e621 expands from {node.pattern}, up to the top 40 by popularity."
     if kind == "StatusConstraint":
         return f"Posts must have status {node.value.value}."
-    return f"Posts must satisfy {_predicate_phrase(node)}."
+    return f"The post must have {_predicate_phrase(node)}."
 
 
 def _negative_sentence(node: Any, *, markup: bool) -> str:
@@ -209,8 +266,8 @@ def _negative_sentence(node: Any, *, markup: bool) -> str:
         tag = _query_code(node.canonical, markup=markup)
         return f"Posts with tag {tag}, or with tags that imply {tag}, are excluded."
     if kind == "WildcardPredicate":
-        return f"Posts matching wildcard pattern {node.pattern} are excluded."
-    return f"Posts satisfying {_predicate_phrase(node)} are excluded."
+        return f"Posts with tags matched by {node.pattern} are excluded."
+    return f"Posts with {_predicate_phrase(node)} are excluded."
 
 
 def _node_phrase(node: Any, *, markup: bool = False) -> str:
@@ -244,7 +301,7 @@ def _predicate_phrase(node: Any) -> str:
     if kind == "UnknownMetatagPredicate":
         return f"unknown metatag {node.raw_key}:{node.raw_value.raw}"
     if kind == "InvalidPredicate":
-        return f"invalid predicate ({node.reason})"
+        return f"invalid query part ({node.reason})"
     return getattr(node, "kind", node.__class__.__name__)
 
 

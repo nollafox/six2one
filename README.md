@@ -22,11 +22,11 @@
   <a href="#commands">Commands</a>
 </p>
 
-**six2one** is a local e621 fetcher and cache manager. Pass it the same query you would type into e621's search bar, and it discovers the matching posts, caches their post JSON in a local SQLite store, fetches any extra data needed to evaluate the query, and downloads the image variant you asked for.
+You've never met an e621 downloader quite like this one. **six2one** turns ordinary e621 searches into a local, reusable cache: post JSON in SQLite, image variants on disk, and just-in-time sidecar data for richer queries.
 
-That cache is what separates six2one from a download script. Each query leaves its results behind — post JSON, sidecar data, images — and over time the store grows into a searchable local archive of the parts of e621 you actually use. Later queries reuse whatever earlier ones already pulled, so nothing is fetched or downloaded twice.
+The cache itself is what separates `six2one` from other download scripts and packages. Each query leaves its results behind — post JSON, sidecar data, images — and over time the store grows into a searchable local archive of the parts of e621 you actually use. Later queries reuse whatever earlier ones already pulled, so nothing is fetched or downloaded twice.
 
-The result is a tool that stays light for a quick search and dependable for a collection you return to over weeks: an artist reference folder, an archive of a saved query, a training set carved out of a larger mirror.
+The result is a tool that stays light for a quick search and dependable for collections you return to over weeks: an artist reference folder, an archive of a saved query, or a training set carved from a larger cache. Eventually, **your searches grow into a local, curated mirror of the e621 tags, posts, and metadata you actually use.**
 
 ## Quick Start
 
@@ -36,42 +36,77 @@ Install six2one from PyPI:
 $ python -m pip install six2one
 ```
 
-That puts the `621` command on your `PATH`. Set up the local workspace and your credentials:
+This puts the `621` command on your `PATH`. Then you can set up the local workspace alongside your credentials:
 
 ```bash
 $ 621 bootstrap          # initialize the local workspace
 $ 621 auth               # store your e621 API credentials
 ```
 
-Fetch a query. `--limit` caps the run at a number of posts; omit it to fetch everything the query returns:
+six2one allows you to **fetch broadly, and export narrowly.** Fetch one wide query, then slice it as many ways as you need — by score, by enrichment, by pool — without touching the network again:
 
 ```bash
-$ 621 fetch "fox solo rating:s" --limit 10
+$ 621 fetch "dragon rating:s" --limit 1000
+$ 621 export "dragon rating:s score:>100" -o ./best-dragons
+$ 621 export "dragon rating:s notes:any" -o ./noted-dragons
+$ 621 export "dragon rating:s pool:*" -o ./pool-dragons
 ```
 
-Images are written under `~/.six2one/images`, and post JSON is cached in `~/.six2one/cache/six2one.sqlite`.
+If you simply want to browse the entire collection, images are stored in `~/.six2one` before exporting.
 
-Export the matching downloaded files into a portable folder of symlinks and one cached JSON file per post:
+## How Queries Work
 
-```bash
-$ 621 export "fox solo rating:s" -o ./fox-export
-```
-
-```text
-fox-export/
-  images/
-    000006407238/
-      original.png
-      sample.jpg
-      preview.jpg
-  posts/
-    000006407238.json
-```
-
-And to see how six2one reads a query before committing to a fetch:
+six2one speaks e621's own post search syntax, so there is no new query language to learn. It supports every construct on e621's [post search syntax cheatsheet](https://e621.net/help/cheatsheet): negated tags, loose-OR terms, nested groups, metatags, ranges, sorting, ratings, status filters, wildcards, aliases, and implications. Before anything runs, six2one can explain the query in plain language: what must match, what is excluded, how aliases and implications expand, and what extra data may need to be cached.
 
 ```bash
 $ 621 query explain "fox ( ~dog ~cat )"
+```
+
+```text
+Query
+  canine ( ~dog ~cat )
+
+Meaning
+  1. The post must match canine. More-specific tags that imply canine can also match.
+  2. Inside the group, the post only needs to match one option: domestic_dog or domestic_cat.
+  3. Results are ordered by post id, descending.
+
+Tag matching
+  canine
+    Matches posts tagged canine.
+    Also matches posts with more-specific tags that imply canine, 
+    such as canis, fox, mythological_canine, and 434 other tags.
+
+  dog → domestic_dog
+    Matches posts tagged domestic_dog, because dog is an alias.
+    Also matches posts with more-specific tags that imply domestic_dog, 
+    such as spitz, pastoral_dog, hunting_dog, and 286 other tags.
+
+  cat → domestic_cat
+    Matches posts tagged domestic_cat, because cat is an alias.
+    Also matches posts with more-specific tags that imply domestic_cat, 
+    such as calico_cat, tabby_cat, hairless_cat, and 65 other tags.
+```
+
+This feature is what keeps fetches efficient, and ensures offline search works the same way it does on e621. If a query can be answered from cached post fields, six2one uses them directly. If it needs richer data, such as comments, notes, pools, sets, or favorites, six2one fetches that data once and stores it with the matching posts.
+
+In other words, simple queries only cache posts, complex queries automatically cache additional data as you go:
+```bash
+ # Only caches posts and downloads images
+$ 621 fetch "dragon rating:s" --limit 100
+
+# This query needs comment data, so six2one fetches and stores it
+$ 621 fetch "dragon rating:s comments:any" --limit 100 
+
+# This query reuses any cached posts, images, and comments
+$ 621 fetch "dragon rating:s comments:any order:score" --limit 100 
+```
+
+Enrichment is cached by post, not by query. Once six2one has comments for post `6407238`, any future query that needs that post’s comments can use the cached copy. Thus, overlapping searches become cheaper over time:
+
+```bash
+# Reuses any cached posts, images, and comments from the prior 3 commands
+621 fetch "scales comments:any order:score" --limit 100 
 ```
 
 ## Local-first Search
@@ -92,49 +127,6 @@ query
 ```
 
 Everything six2one caches lives under `~/.six2one`. The global cache is deliberate — it is what lets unrelated queries share data. Downloaded files are never scattered through your working directories; they stay in the workspace until you `export` them somewhere explicit.
-
-## How Queries Work
-
-six2one speaks e621's own post search syntax, so there is no new query language to learn. It supports every construct on e621's [post search syntax cheatsheet](https://e621.net/help/cheatsheet): negated tags, loose-OR terms, nested groups, metatags, ranges, sorting, ratings, status filters, wildcards, aliases, and implications. Every query is parsed, bound against cached tag data, and explainable before any work runs.
-
-```bash
-$ 621 query explain "fox ( ~dog ~cat )"
-```
-
-```text
-six2one query explain
-
-Query
-  fox ( ~dog ~cat )
-
-Meaning
-  Read literally, this query means:
-  The post must have tag fox. More-specific tags that imply fox can also match.
-  The parenthesized group must also be true.
-  At least one loose-OR entry must match: dog or cat.
-  Deleted posts are hidden by default.
-  Results are ordered by post id, descending.
-
-Data needed
-  Alias graph                required
-  Implication graph          required
-  Post core fields           required
-  Tag category index         required
-
-No errors.
-```
-
-That same parse is what keeps fetches efficient. A query answerable from cached post fields uses them directly; a query that needs richer data — comments, notes, pools, sets, favorites — makes six2one fetch and cache it once.
-
-Enrichment is cached by post, not by query. If one query fetches the comments for post `6407238`, every later query that needs that post's comments reads the cached copy, so similar queries get cheaper the more you run:
-
-```bash
-$ 621 fetch "dragon rating:s" --limit 100
-$ 621 fetch "dragon rating:s comments:any" --limit 100
-$ 621 fetch "dragon rating:s comments:any order:score" --limit 100
-```
-
-The first command caches posts and downloads images. The second needs comment data, so six2one fetches and stores it. The third reuses the cached posts, images, and comments wherever the post sets overlap — downloading nothing already on disk and re-fetching no enrichment already cached.
 
 ## Local Storage
 
@@ -392,5 +384,5 @@ $ poetry run python -m compileall -q src
 </p>
 
 <p align="center">
-  Crafted by <strong>Nolla Fox</strong>
+  Crafted with ❤️ by <strong>Nolla Fox</strong>
 </p>

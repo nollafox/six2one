@@ -30,6 +30,17 @@ def test_source_runs_and_posts_are_persisted(store):
     assert store.posts.list_ids() == (101,)
 
 
+def test_cached_post_tags_are_stored_once_by_normalized_e621_name(store):
+    payload = post_payload(102, tag="Domestic Cat")
+
+    store.posts.upsert(payload)
+
+    rows = store.database.fetch_all("SELECT tag FROM post_tags WHERE post_id = ? ORDER BY tag", (102,))
+    tags = [row["tag"] for row in rows]
+    assert "domestic_cat" in tags
+    assert "Domestic Cat" not in tags
+
+
 def test_enrichment_store_tracks_missing_and_ready_dependencies(store):
     run = store.source_runs.create("dragon rating:s", backend="sqlite")
     store.posts.upsert(post_payload(101, tag="fox"))

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .command import QueueClearPreview, QueueClearResult, QueueCommandResult, QueueListResult, SourceRunQueueSummary
+from .command import QueueAmendResult, QueueClearPreview, QueueClearResult, QueueCommandResult, QueueListResult, SourceRunQueueSummary
 
 
 def _n(value: int | None, *, none: str = "n/a") -> str:
@@ -182,4 +182,37 @@ def format_queue_clear_result(result: QueueClearResult) -> str:
     else:
         headline = "Queue cleared."
     lines = [headline, "", "Removed", _field("Pending image jobs", _n(result.pending_removed)), _field("Failed image jobs", _n(result.failed_removed)), _field("Source runs affected", _n(result.source_runs_affected)), "", "Kept", _field("Cached post JSON", _n(result.cached_post_json) if result.cached_post_json else "unchanged"), _field("Downloaded images", _n(result.downloaded_images) if result.downloaded_images else "unchanged"), _field("Source run metadata", "kept")]
+    return "\n".join(lines)
+
+
+def format_queue_amend_result(result: QueueAmendResult) -> str:
+    lines = [
+        "Source run amended.",
+        "",
+        "Source run",
+        _field("id", result.source_run_id),
+        _field("exclude", result.exclude),
+        "",
+        "Query",
+        f"  {result.original_query}",
+        "",
+        "Amended query",
+        f"  {result.amended_query}",
+        "",
+        "Removed",
+        _field("Pending image jobs", _n(result.pending_removed)),
+        _field("Failed image jobs", _n(result.failed_removed)),
+        _field("Total image jobs", _n(result.removed_image_jobs)),
+        "",
+        "Remaining",
+        _field("Image jobs", _n(result.remaining_image_jobs)),
+        "",
+        "Kept",
+        _field("Cached post JSON", _n(result.cached_post_json) if result.cached_post_json else "unchanged"),
+        _field("Downloaded images", _n(result.downloaded_images) if result.downloaded_images else "unchanged"),
+        "",
+        "Next",
+        "  Download remaining jobs:",
+        "    621 fetch --queue",
+    ]
     return "\n".join(lines)

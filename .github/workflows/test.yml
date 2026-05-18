@@ -50,10 +50,10 @@ jobs:
           virtualenvs-in-project: false
 
       - name: Install dependencies
-        run: poetry install
+        run: poetry install --with dev
 
       - name: Run tests
-        run: poetry run python -m unittest discover -s tests
+        run: poetry run pytest
 
       - name: Compile package
         run: poetry run python -m compileall -q six2one

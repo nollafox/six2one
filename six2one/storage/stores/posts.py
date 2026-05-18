@@ -5,6 +5,7 @@ from typing import Any, Iterable, Mapping
 
 from .base import BaseStore
 from ..models import StoredPost
+from ..models.tag import normalize_tag_name
 
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:
@@ -117,7 +118,7 @@ class PostsStore(BaseStore):
             for tag in values or []:
                 self.database.execute(
                     "INSERT OR IGNORE INTO post_tags (post_id, category, tag) VALUES (?, ?, ?)",
-                    (post_id, str(category), str(tag)),
+                    (post_id, str(category), normalize_tag_name(str(tag))),
                 )
 
         for source in payload.get("sources") or []:

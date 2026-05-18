@@ -54,12 +54,19 @@ class QueueStore(BaseStore):
         row = self.database.fetch_one(
             """
             SELECT id FROM queue_jobs
-            WHERE state IN (?, ?)
-              AND (available_at IS NULL OR available_at <= ?)
+            WHERE (
+                state IN (?, ?)
+                AND (available_at IS NULL OR available_at <= ?)
+            )
+            OR (
+                state = ?
+                AND lease_expires_at IS NOT NULL
+                AND lease_expires_at <= ?
+            )
             ORDER BY priority DESC, created_at ASC
             LIMIT 1
             """,
-            (JobState.PENDING.value, JobState.RETRYING.value, now),
+            (JobState.PENDING.value, JobState.RETRYING.value, now, JobState.RUNNING.value, now),
         )
         if row is None:
             return None

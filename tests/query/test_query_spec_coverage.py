@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from six2one.query import E621QueryLanguage
+from six2one.query import evaluate_post
 from six2one.query.ast import (
     BoundedRange,
     CollectionPredicate,
@@ -409,6 +410,14 @@ def test_alias_and_implication_chain_resolution_from_tag_database():
 
     huge = next(node for node in tags if node.raw == "huge_breasts")
     assert "hyper_breasts" in huge.negative_exclusion_closure.materialized
+
+
+def test_evaluator_uses_negative_exclusion_closure_for_prohibited_tags():
+    language = E621QueryLanguage(tag_database=FakeTagDatabase())
+    compiled = compile_ok("breasts -huge_breasts", language=language)
+
+    assert evaluate_post(compiled, {"id": 1, "tags": {"general": ["hyper_breasts"]}}) is False
+    assert evaluate_post(compiled, {"id": 2, "tags": {"general": ["big_breasts"]}}) is True
 
 
 @pytest.mark.parametrize(

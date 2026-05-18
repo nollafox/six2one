@@ -13,10 +13,13 @@ from six2one.query.ast import (
     RatingValue,
     ScopeExpr,
 )
+from six2one.query import E621QueryLanguage
+from six2one.storage import open_storage
+from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.text import Template, Text
 
 from .core import Explain, ExplainResult
-from .descriptions import describe_query
+from .descriptions import describe_query, tag_matching_entries
 from . import styles
 
 
@@ -29,6 +32,9 @@ PRETTY = Template(
 
     [bold cyan]Meaning[/]
     {natural_language_description}
+
+    [bold cyan]Tag matching[/]
+    {tag_matching}
 
     [bold cyan]Notes[/]
     {natural_language_notes}
@@ -93,6 +99,7 @@ class ExplainCommand:
     explain: Explain
     text: Text
     query: str
+    config: SixTwoOneConfig
     compact: bool = False
 
     @classmethod
@@ -101,11 +108,12 @@ class ExplainCommand:
             explain=Explain(),
             text=Text.for_cli(args),
             query=getattr(args, "query"),
+            config=SixTwoOneConfig.from_args(args),
             compact=bool(getattr(args, "compact", False)),
         )
 
     def run(self) -> int:
-        result = self.explain.run(self.query)
+        result = self._run_explain()
         payload = result.as_dict()
         self.text.json_result(payload)
 
@@ -123,6 +131,12 @@ class ExplainCommand:
         self.text.finish()
         return 0 if result.ok else 1
 
+    def _run_explain(self) -> ExplainResult:
+        if self.config.storage_path.exists():
+            with open_storage(self.config.storage_path, read_only=True) as storage:
+                return Explain(E621QueryLanguage(tag_database=storage.tags)).run(self.query)
+        return self.explain.run(self.query)
+
 
 def _pretty_values(result: ExplainResult) -> dict[str, str]:
     payload = result.as_dict()
@@ -135,6 +149,7 @@ def _pretty_values(result: ExplainResult) -> dict[str, str]:
     return {
         "query": styles.highlighted_query(result.explanation.raw.tokens),
         "natural_language_description": description.indented(),
+        "tag_matching": _tag_matching(result),
         "natural_language_notes": description.indented_notes(),
         "parse_summary": _parse_summary(payload),
         "semantic_filters": _semantic_filters(result),
@@ -250,6 +265,26 @@ def _semantic_filters(result: ExplainResult) -> str:
             lines.append(_row("contributes predicate", styles.value(_yes_no(status.contributes_predicate)), indent=6, width=DETAIL_LABEL_WIDTH))
     if not lines:
         lines.append("  none")
+    return "\n".join(lines)
+
+
+def _tag_matching(result: ExplainResult) -> str:
+    entries = tag_matching_entries(result.explanation.bound.root)
+    if not entries:
+        return "  none"
+    lines: list[str] = []
+    for index, entry in enumerate(entries):
+        if index:
+            lines.append("")
+        label = entry.raw if entry.raw == entry.canonical else f"{entry.raw} → {entry.canonical}"
+        lines.append(f"  {styles.code(label)}")
+        alias_note = f", because {styles.code(entry.alias_from)} is an alias" if entry.alias_applied else ""
+        lines.append(f"    Matches posts tagged {styles.code(entry.canonical)}{alias_note}.")
+        if entry.examples:
+            examples = _join_tag_examples(entry.examples, remaining_count=entry.remaining_count)
+            lines.append(f"    Also matches posts with more-specific tags that imply {styles.code(entry.canonical)}, such as {examples}.")
+        else:
+            lines.append(f"    No more-specific implying tags are currently known in the loaded tag database.")
     return "\n".join(lines)
 
 
@@ -473,3 +508,16 @@ def _direction(value: str) -> str:
 
 def _yes_no(value: bool) -> str:
     return "yes" if value else "no"
+
+
+def _join_tag_examples(values: tuple[str, ...], *, remaining_count: int) -> str:
+    coded = [styles.code(value) for value in values]
+    if remaining_count > 0:
+        if not coded:
+            return f"{remaining_count:,} other tags"
+        return ", ".join(coded) + f", and {remaining_count:,} other tags"
+    if len(coded) == 1:
+        return coded[0]
+    if len(coded) == 2:
+        return f"{coded[0]} or {coded[1]}"
+    return ", ".join(coded[:-1]) + f", and {coded[-1]}"

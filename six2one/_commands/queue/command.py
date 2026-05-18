@@ -18,7 +18,7 @@ from six2one.storage.models import ImageState
 from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.errors import CommandError
 
-from .planning import locally_matching_post_ids, queue_query_work
+from .planning import _bound_query_metadata, _canonical_query, compile_query, locally_matching_post_ids, queue_query_work
 
 SourceRunState = Literal["pending", "downloading", "paused", "success"]
 
@@ -147,6 +147,22 @@ class QueueClearResult:
     updated_runs: tuple[SourceRunQueueSummary, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class QueueAmendResult:
+    """Result after folding an exclusion into a source run."""
+
+    source_run_id: str
+    exclude: str
+    original_query: str
+    amended_query: str
+    removed_image_jobs: int = 0
+    pending_removed: int = 0
+    failed_removed: int = 0
+    remaining_image_jobs: int = 0
+    cached_post_json: int = 0
+    downloaded_images: int = 0
+
+
 def run_queue(
     config: SixTwoOneConfig,
     query: str,
@@ -192,7 +208,84 @@ def run_queue(
             skipped=plan.counts.skipped,
             enrichment_jobs=plan.counts.enrichment_jobs,
         ),
-    )
+        )
+
+
+def run_queue_amend(
+    config: SixTwoOneConfig,
+    source_run_id: str,
+    *,
+    exclude: str,
+    backend: Any | None = None,
+) -> QueueAmendResult:
+    """Fold a new exclusion into one source run and remove matching image jobs."""
+
+    if backend is not None and hasattr(backend, "queue_amend"):
+        return backend.queue_amend(config, source_run_id, exclude=exclude)
+
+    source_run_id = source_run_id.strip()
+    exclude = exclude.strip()
+    if not source_run_id:
+        raise CommandError("queue amend requires a source run id")
+    if not exclude:
+        raise CommandError("queue amend requires --exclude QUERY")
+
+    with open_storage(config.storage_path) as storage:
+        run = storage.source_runs.get(source_run_id)
+        if run is None:
+            raise CommandError(f"Unknown source run: {source_run_id}")
+
+        excluded_post_ids = _locally_matching_post_ids(storage, exclude)
+        removable_jobs = [
+            job
+            for job in storage.queue.list(
+                states=(JobState.PENDING, JobState.RETRYING, JobState.RUNNING, JobState.FAILED),
+                source_run_id=source_run_id,
+            )
+            if job.kind == JobKind.DOWNLOAD_IMAGE.value
+            and int(job.payload.get("post_id", -1)) in excluded_post_ids
+        ]
+        pending_removed = sum(1 for job in removable_jobs if job.state in {JobState.PENDING, JobState.RETRYING, JobState.RUNNING})
+        failed_removed = sum(1 for job in removable_jobs if job.state is JobState.FAILED)
+        for job in removable_jobs:
+            storage.queue.cancel(job.id, message=f"removed by queue amend --exclude {exclude}")
+
+        amended_query = _amended_query(run.query, exclude)
+        exclusions = [*run.metadata.get("exclusions", ()), exclude]
+        compiled = compile_query(storage, amended_query)
+        storage.source_runs.update_query(
+            source_run_id,
+            amended_query,
+            metadata={
+                "original_query": run.metadata.get("original_query", run.query),
+                "exclusions": exclusions,
+                "raw_query": amended_query,
+                "normalized_query": _canonical_query(compiled),
+                "canonical_query": _canonical_query(compiled),
+                "bound_query_json": _bound_query_metadata(compiled),
+            },
+        )
+        remaining = [
+            job
+            for job in storage.queue.list(
+                states=(JobState.PENDING, JobState.RETRYING, JobState.RUNNING, JobState.FAILED),
+                source_run_id=source_run_id,
+            )
+            if job.kind == JobKind.DOWNLOAD_IMAGE.value
+        ]
+
+        return QueueAmendResult(
+            source_run_id=source_run_id,
+            exclude=exclude,
+            original_query=run.query,
+            amended_query=amended_query,
+            removed_image_jobs=len(removable_jobs),
+            pending_removed=pending_removed,
+            failed_removed=failed_removed,
+            remaining_image_jobs=len(remaining),
+            cached_post_json=len(storage.posts.list_ids()),
+            downloaded_images=_downloaded_image_count(storage),
+        )
 
 
 def run_queue_list(
@@ -359,6 +452,10 @@ def _locally_matching_post_ids(storage, query: str) -> set[int]:
     """Return cached posts matching a semantic e621 query."""
 
     return locally_matching_post_ids(storage, query)
+
+
+def _amended_query(query: str, exclude: str) -> str:
+    return f"{query.strip()} -( {exclude.strip()} )".strip()
 
 
 def _downloaded_image_count(storage) -> int:

@@ -43,3 +43,20 @@ class SourceRunsStore(BaseStore):
             (state, total_candidates, total_matches, state, id),
         )
         self.database.commit()
+
+    def update_query(self, id: str, query: str, *, metadata: Mapping[str, Any] | None = None) -> None:
+        run = self.get(id)
+        merged_metadata = dict(run.metadata if run is not None else {})
+        if metadata:
+            merged_metadata.update(dict(metadata))
+        self.database.execute(
+            """
+            UPDATE source_runs
+            SET query = ?,
+                metadata_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (query, json.dumps(merged_metadata), id),
+        )
+        self.database.commit()

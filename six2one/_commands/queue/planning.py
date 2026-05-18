@@ -14,6 +14,7 @@ from math import ceil
 from typing import Any, Iterable, Mapping
 
 from six2one.query import E621QueryLanguage, filter_posts
+from six2one.query.ast import Occurrence, ScopeExpr, TagPredicate
 from six2one.queue import Queue, default_registry
 from six2one.queue.models import JobKind, JobState
 from six2one.storage.models import EnrichmentState, ImageVariant
@@ -117,6 +118,10 @@ def queue_query_work(
             "image_variant": variant,
             "dependencies": dependencies,
             "discovered_pages": discovered_pages,
+            "raw_query": query,
+            "normalized_query": _canonical_query(compiled),
+            "canonical_query": _canonical_query(compiled),
+            "bound_query_json": _bound_query_metadata(compiled),
             "diagnostics": [
                 {"code": diagnostic.code.value, "message": diagnostic.message, "severity": diagnostic.severity.value}
                 for diagnostic in compiled.diagnostics
@@ -196,6 +201,68 @@ def _fetch_posts(e621: Any, query: str, *, limit: int | None) -> list[Any]:
 
 def _dependency_kind(dependency: Any) -> str:
     return str(getattr(dependency, "kind", dependency))
+
+
+def _canonical_query(compiled: Any) -> str:
+    source = str(compiled.source)
+    replacements: list[tuple[int, int, str]] = []
+    for term, tag in _tag_terms(compiled.bound.root):
+        start = tag.span.start
+        end = tag.span.end
+        prefix = ""
+        if tag.span.text.startswith("-") or tag.span.text.startswith("~"):
+            prefix = tag.span.text[:1]
+        replacements.append((start, end, f"{prefix}{tag.canonical}"))
+
+    canonical = source
+    for start, end, value in sorted(replacements, reverse=True):
+        canonical = canonical[:start] + value + canonical[end:]
+    return canonical
+
+
+def _bound_query_metadata(compiled: Any) -> dict[str, Any]:
+    required_tags: list[dict[str, Any]] = []
+    excluded_tags: list[dict[str, Any]] = []
+    loose_tags: list[dict[str, Any]] = []
+    for term, tag in _tag_terms(compiled.bound.root):
+        item = {
+            "raw": tag.raw,
+            "canonical": tag.canonical,
+            "alias_applied": tag.resolution.alias_applied,
+            "alias_from": tag.resolution.alias_from,
+            "alias_to": tag.resolution.alias_to,
+            "search_names": list(tag.positive_search_closure.materialized or (tag.canonical,)),
+            "exclusion_names": list(tag.negative_exclusion_closure.materialized or (tag.canonical,)),
+        }
+        if term.occurrence is Occurrence.PROHIBITED:
+            excluded_tags.append(item)
+        elif term.occurrence is Occurrence.LOOSE:
+            loose_tags.append(item)
+        else:
+            required_tags.append(item)
+
+    return {
+        "required_tags": required_tags,
+        "excluded_tags": excluded_tags,
+        "loose_tags": loose_tags,
+        "data_dependencies": [_dependency_kind(dependency) for dependency in compiled.bound.data_dependencies],
+    }
+
+
+def _tag_terms(scope: ScopeExpr):
+    for term in scope.required:
+        node = term.node
+        if isinstance(node, TagPredicate):
+            yield term, node
+        elif getattr(node, "kind", None) == "Scope":
+            yield from _tag_terms(node)
+    if scope.loose_or is not None:
+        for term in scope.loose_or.entries:
+            node = term.node
+            if isinstance(node, TagPredicate):
+                yield term, node
+            elif getattr(node, "kind", None) == "Scope":
+                yield from _tag_terms(node)
 
 
 def _enqueue_evaluation_job(

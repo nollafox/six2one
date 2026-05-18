@@ -4,27 +4,29 @@
   <img src="https://github.com/nollafox/six2one/raw/main/docs/banner.png" alt="six2one banner" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12); max-width: 100%; height: auto;">
 </p>
 
-
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-1E90FF" alt="Python 3.10+">
   <a href="https://github.com/nollafox/six2one/actions/workflows/test.yml">
     <img src="https://img.shields.io/github/actions/workflow/status/nollafox/six2one/test.yml?branch=main&label=tests&color=2E8B57" alt="Test status">
   </a>
-  <img src="https://img.shields.io/badge/CLI-621%20%7C%20926-4169E1" alt="621 and 926 CLI">
-  <img src="https://img.shields.io/badge/sites-e621%20%7C%20e926-8A2BE2" alt="e621 and e926">
+  <img src="https://img.shields.io/badge/CLI-621-4169E1" alt="621 CLI">
+  <img src="https://img.shields.io/badge/site-e621-8A2BE2" alt="e621">
   <img src="https://img.shields.io/badge/author-Nolla%20Fox-2E8B57" alt="Author: Nolla Fox">
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
-  <a href="#how-queries-compile">Queries</a> •
-  <a href="#the-manifest">Manifest</a> •
+  <a href="#local-first-search">Local-first Search</a> •
+  <a href="#how-queries-work">Queries</a> •
+  <a href="#local-storage">Storage</a> •
   <a href="#commands">Commands</a>
 </p>
 
-**six2one** is a small command-line fetcher for e621 and e926. Pass it the same tags you'd type into the site search; it compiles them into a query, downloads matching posts in API-friendly pages, and stores post JSON plus images in a manifest-backed local cache. The `manifest.json` records where each post's metadata and image variants live, so you can resume, dedupe, repair, inspect, and prune without managing state yourself.
+**six2one** is a local e621 fetcher and cache manager. Pass it the same query you would type into e621's search bar, and it discovers the matching posts, caches their post JSON in a local SQLite store, fetches any extra data needed to evaluate the query, and downloads the image variant you asked for.
 
-The result is a CLI that stays pleasant for one-off searches and trustworthy for long-running collections: reference folders for a particular artist, archives of a saved search, the occasional small dataset.
+That cache is what separates six2one from a download script. Each query leaves its results behind — post JSON, sidecar data, images — and over time the store grows into a searchable local archive of the parts of e621 you actually use. Later queries reuse whatever earlier ones already pulled, so nothing is fetched or downloaded twice.
+
+The result is a tool that stays light for a quick search and dependable for a collection you return to over weeks: an artist reference folder, an archive of a saved query, a training set carved out of a larger mirror.
 
 ## Quick Start
 
@@ -34,244 +36,351 @@ Install six2one from PyPI:
 $ python -m pip install six2one
 ```
 
-That installs the `621` and `926` commands onto your `PATH`.
-
-The following command searches e621 for `fox solo rating:s` and begins to download the posts returned:
+That puts the `621` command on your `PATH`. Set up the local workspace and your credentials:
 
 ```bash
-$ 621 fox solo --safe
+$ 621 bootstrap          # initialize the local workspace
+$ 621 auth               # store your e621 API credentials
 ```
 
-This will download into `output/fox-solo-safe/` with the following layout:
+Fetch a query. `--limit` caps the run at a number of posts; omit it to fetch everything the query returns:
 
+```bash
+$ 621 fetch "fox solo rating:s" --limit 10
 ```
-output/fox-solo-safe/
-  json/
+
+Images are written under `~/.six2one/images`, and post JSON is cached in `~/.six2one/cache/six2one.sqlite`.
+
+Export the matching downloaded files into a portable folder of symlinks and one cached JSON file per post:
+
+```bash
+$ 621 export "fox solo rating:s" -o ./fox-export
+```
+
+```text
+fox-export/
   images/
-    preview/
-    sample/
-    original/
-  manifest.json
+    000006407238/
+      original.png
+      sample.jpg
+      preview.jpg
+  posts/
+    000006407238.json
 ```
 
-Alternatively, for the safe-only sister site, pass `--site e926`, or use the `926` binary, which applies that site default automatically:
+And to see how six2one reads a query before committing to a fetch:
 
 ```bash
-$ 926 fox solo --safe
+$ 621 query explain "fox ( ~dog ~cat )"
 ```
 
-You may also use `--dry-run` to see the compiled query before downloading anything:
+## Local-first Search
 
+The first time a query needs a piece of data, six2one fetches it from e621. After that the data is local, and the next query that needs it reads from the cache instead of the network. Broad fetches fill the archive, narrower queries carve it, and exports turn matching downloaded posts into portable folders — none of it re-fetching what is already on disk.
+
+A single run moves through the same stages, from a raw query to files on disk:
+
+```text
+query
+  → compile the query
+  → discover matching posts
+  → cache post JSON
+  → fetch missing enrichment
+  → evaluate the query locally
+  → queue and download images
+  → export semantic subsets
 ```
-$ 621 fox solo --safe --dry-run
-Compiled query: fox solo rating:s
-```
 
-For an isolated CLI install, use `pipx install six2one`. For an editable install from a local clone, use `python -m pip install --user -e .`. If `621` installs but your shell cannot find it, run `python -m site --user-base`; the binary lives under that path's `bin/` directory, or `Scripts\` on Windows.
+Everything six2one caches lives under `~/.six2one`. The global cache is deliberate — it is what lets unrelated queries share data. Downloaded files are never scattered through your working directories; they stay in the workspace until you `export` them somewhere explicit.
 
-## How Queries Compile
+## How Queries Work
 
-Tags pass through to e621 unchanged. Artist tags, OR terms, exclusions, and rating get appended in a fixed order, and `--dry-run` shows exactly what comes out:
+six2one speaks e621's own post search syntax, so there is no new query language to learn. It supports every construct on e621's [post search syntax cheatsheet](https://e621.net/help/cheatsheet): negated tags, loose-OR terms, nested groups, metatags, ranges, sorting, ratings, status filters, wildcards, aliases, and implications. Every query is parsed, bound against cached tag data, and explainable before any work runs.
 
 ```bash
-$ 621 fox solo \
-    --author some_artist \
-    --any cat,dog \
-    --exclude chicken,watermark,comic \
-    --safe \
-    --dry-run
-
-# Compiled query: fox solo some_artist ~cat ~dog -chicken -watermark -comic rating:s
+$ 621 query explain "fox ( ~dog ~cat )"
 ```
 
-That compiled string is what you'd type into the e621 search bar, which is also why six2one's parser stays thin. The flags are conveniences for patterns six2one already knows; everything else, including wildcards (`cat*`), single-dash negation (`-comic`), and grouped OR syntax (`( ~cat ~dog )`), passes through to e621's native [search syntax](https://e621.net/help/cheatsheet). Unknown long options stay CLI errors rather than being silently forwarded, but anything that works in the search bar works here:
+```text
+six2one query explain
+
+Query
+  fox ( ~dog ~cat )
+
+Meaning
+  Read literally, this query means:
+  The post must have tag fox. More-specific tags that imply fox can also match.
+  The parenthesized group must also be true.
+  At least one loose-OR entry must match: dog or cat.
+  Deleted posts are hidden by default.
+  Results are ordered by post id, descending.
+
+Data needed
+  Alias graph                required
+  Implication graph          required
+  Post core fields           required
+  Tag category index         required
+
+No errors.
+```
+
+That same parse is what keeps fetches efficient. A query answerable from cached post fields uses them directly; a query that needs richer data — comments, notes, pools, sets, favorites — makes six2one fetch and cache it once.
+
+Enrichment is cached by post, not by query. If one query fetches the comments for post `6407238`, every later query that needs that post's comments reads the cached copy, so similar queries get cheaper the more you run:
 
 ```bash
-$ 621 "( ~cat ~tiger ~leopard ) ( ~dog ~wolf )" --safe
-$ 621 fox african_wild_dog -chicken
+$ 621 fetch "dragon rating:s" --limit 100
+$ 621 fetch "dragon rating:s comments:any" --limit 100
+$ 621 fetch "dragon rating:s comments:any order:score" --limit 100
 ```
 
-To fetch more than the 320-post default, raise `--limit` or use `--all`. The downloader continues in API-sized pages until it reaches the requested count or the query is exhausted:
+The first command caches posts and downloads images. The second needs comment data, so six2one fetches and stores it. The third reuses the cached posts, images, and comments wherever the post sets overlap — downloading nothing already on disk and re-fetching no enrichment already cached.
 
-```bash
-$ 621 fox solo --safe --limit 1000
-$ 621 dragon solo --explicit --all --resume
+## Local Storage
+
+`bootstrap` creates the six2one workspace under `~/.six2one`:
+
+```text
+~/.six2one/
+  config.toml
+  bootstrap.json
+  cache/
+    six2one.sqlite
+  images/
 ```
 
-## The Manifest
+The SQLite database holds the cache:
 
-Every output folder gets a `manifest.json` that records downloaded posts by numeric post ID, with relative paths to the post JSON and any cached image variants. It also records each compiled query, the site it came from, and the cursor needed to continue that search later. That record keeps the folder understandable across sessions: you can stop a fetch, come back later, and continue without reasoning from whatever happens to be on disk.
-
-The same record also controls how six2one handles folders it has already touched. Existing manifests are reused as a cache across searches. If a post is already recorded and the requested image size exists, six2one skips the download. If the manifest says a JSON file or image should exist but it is missing, the next fetch repairs that entry before continuing.
-
-```bash
-$ 621 fox solo --safe              # use cached posts, then fetch up to the limit
-$ 621 fox solo --safe --resume     # fetch the next limit's worth of posts
-$ 621 dragon solo --explicit --all --resume
-```
-
-The continuation rules follow from that cache:
-
-| Situation | Behavior |
+| Data | Purpose |
 |---|---|
-| Same query without `--resume` | Start the search from the latest results and stop at the requested limit, skipping cached posts. |
-| Same query with `--resume` | Continue after the previous cursor and fetch the next requested count, or to the end with `--all`. |
-| Different query in the same output | Add a new query state and reuse any already cached posts. |
-| Same post, different image size | Download only the missing size and record it under the same post entry. |
-| Manifest-listed files are missing | Refetch post JSON or image files to heal the cache. |
-| Files exist that aren't in the manifest | Leave them alone; the manifest is the cache index. |
+| Cached posts | Raw post JSON and searchable post fields. |
+| Source runs | Query runs and discovery metadata. |
+| Queue jobs | Pending, running, failed, and completed work. |
+| Enrichment coverage | Which sidecar data has already been fetched. |
+| Tags | Tag metadata, aliases, implications, and categories. |
+| Images | Where downloaded image variants live on disk. |
 
-You do not edit the manifest directly. It is deliberately path-oriented rather than a second copy of the post metadata; the canonical post data lives in `json/<id>.json`.
+Images are stored on disk by post ID and variant, so if two queries match the same post and ask for the same variant, the image is downloaded only once:
 
-## What's in the Output Folder
-
-The layout is stable:
-
-```
-json/                 raw post JSON record per post
-images/preview/       preview images
-images/sample/        sample images
-images/original/      original files
-manifest.json
+```text
+~/.six2one/images/
+  000006407238/
+    preview.jpg
+    sample.jpg
+    original.png
 ```
 
-Post JSON is stored once per post, and image variants are stored by size. That keeps the output folder useful after the download is over: grep the JSON, re-derive captions from tags, rebuild a downstream index, or use `show` to merge the manifest entry, raw post JSON, and local file paths into one view of a post.
-
-The `--size` flag controls which image variant to fetch, mapping directly to e621 and e926 post fields:
-
-| Size | e621/e926 post field |
+| Variant | e621 post field |
 |---|---|
 | `preview` | `post["preview"]` |
-| `sample` | `post["sample"]` (default) |
+| `sample` | `post["sample"]` |
 | `original` | `post["file"]` |
 
-If the chosen URL is missing for a post, six2one records a warning and still keeps any post JSON it was able to cache.
+For each file, the database records which variant it is, where it was written, and the source URL it came from.
 
 ## Commands
 
-```
-usage: 621 [fetch] [TAGS ...] [options]
-       621 show POST_ID... [options]
-       621 prune [output_dir]
+```text
+usage: 621 COMMAND [options]
+
+Queue, enrich, and fetch e621 posts into the local six2one store.
+
+commands:
+  bootstrap   initialize the local six2one workspace
+  auth        configure e621 API credentials
+  query       inspect e621-style query syntax
+  queue       discover and enqueue query work
+  fetch       discover, enqueue, and download posts
+  export      export downloaded images and cached post JSON
 ```
 
-`fetch` is the default subcommand, so `621 fox solo --safe` and `621 fetch fox solo --safe` are equivalent.
-
-### Login
+### Bootstrap
 
 ```bash
-$ 621 login nollafox YOUR_E621_API_KEY
-$ 621 logout
+$ 621 bootstrap
 ```
 
-`login` writes `.six2one-login.json` next to the installed or source six2one project root, and `logout` removes it. The location is tied to where six2one itself lives on disk, not the directory where you run `621`. When present, those credentials are used for HTTP Basic auth and a username-specific `User-Agent` on API requests.
+`bootstrap` prepares the workspace: it writes the config file, initializes the SQLite store, runs migrations, and imports the e621 tag data that query binding needs for tag lookup, aliases, implications, and categories. Most other commands expect it to have run first.
 
-That login flow is one part of being a well-behaved e621 client. The other part is pacing: six2one uses an instance-owned rate limiter capped at 2 requests per second, and it pages through search results in chunks of at most 320 posts per API call, which is the e621 post-search maximum. Even `--all` fetches use that same pacing and pagination.
-
-For the safe-only sister site, pass `--site e926` to any fetch or show command, or use the `926` binary, which applies that site default automatically:
+### Auth
 
 ```bash
-$ 621 fox solo --site e926 --all
-$ 926 fox solo --all
-$ 926 show 6394158 --fetch  # fetch from e926 if available there
+$ 621 auth
+$ 621 auth --test
+$ 621 auth --remove
+```
+
+`auth` stores the e621 API credentials used by network commands. `--test` verifies them; `--remove` deletes them.
+
+### Query Explain
+
+```bash
+$ 621 query explain "fox ( ~dog ~cat )"
+$ 621 query explain "score:>100 order:score rating:s" --compact
+$ 621 query explain "dragon rating:e" --json
+```
+
+`query explain` parses, binds, and explains a query without touching the network. It reports the required and excluded tags, loose-OR groups, metatags, sorting, the data the query depends on, and any compatibility notes or diagnostics — the safest way to see what a long fetch will do before you start it.
+
+### Queue
+
+Use `queue` when you want to inspect, modify, or stage work before downloading. It runs discovery only: it finds matching posts, caches their post JSON, enqueues any enrichment the query needs, evaluates the query locally, and queues image downloads — without downloading them.
+
+```bash
+$ 621 queue "dragon rating:s" --limit 10
+```
+
+```text
+six2one queue
+
+Query
+  dragon rating:s
+
+Phase 1/1: Discovering posts
+  pages                    48 / 48
+  cached post JSON         3,812
+  new image jobs           3,812
+  already queued           0
+  already downloaded       0
+  skipped                  0
+
+Queued.
+
+Next
+  Download queued images:
+    621 fetch --queue
+```
+
+Inspect and manage queued work:
+
+```bash
+$ 621 queue list
+$ 621 queue list --failed
+$ 621 queue clear --failed --yes
+$ 621 queue clear q_01HXW6T2KZ9A
+```
+
+`queue clear` also accepts a query. It is not text-matched against the original run — it is evaluated against the cached post data, and removes only the queued jobs whose posts match. `queue clear "canine -paws"`, for instance, drops the queued images for posts that are tagged `canine` but not also tagged `paws`:
+
+```bash
+$ 621 queue clear "young"
+$ 621 queue clear "canine -paws"
+$ 621 queue clear "rating:e dragon -animated"
+```
+
+`queue amend` does the inverse — instead of clearing from a run, it folds a new exclusion into the source run itself and updates the jobs that remain:
+
+```bash
+$ 621 queue amend q_01HXW6T2KZ9A --exclude "young"
+$ 621 queue amend q_01HXW6T2KZ9A --exclude "canine -paws"
+```
+
+Either way, cached post JSON, downloaded images, and source-run metadata are left untouched; the run stays inspectable. A staged workflow looks like:
+
+```bash
+$ 621 queue "dragon rating:s" --limit 1000
+$ 621 queue clear "young"
+$ 621 queue amend q_01HXW6T2KZ9A --exclude "canine -paws"
+$ 621 fetch --queue
 ```
 
 ### Fetch
 
 ```bash
-$ 621 [fetch] TAGS... [options]
+$ 621 fetch "dragon rating:s" --limit 10
 ```
 
-| Option | Meaning |
-|---|---|
-| `TAGS` | e621 tag query terms. Supports `-tag`, `~tag`, wildcards, and grouped OR syntax. |
-| `-o, --out DIR` | Output directory. Default: `./output/<query-slug>`. |
-| `-n, --limit N` | Number of posts to fetch. Default: `320`. |
-| `--all` | Fetch until the query is exhausted. |
-| `--safe` / `--questionable` / `--explicit` | Shortcuts for `--rating`. |
-| `--rating RATING` | One of `safe`, `questionable`, `explicit`, `s`, `q`, or `e`. |
-| `--author NAME`, `--artist NAME`, `--by NAME` | Add an artist tag. Repeatable. |
-| `--any TAG` | Add OR terms as `~TAG`. Repeatable and comma-separated. |
-| `-x, --exclude TAG` | Exclude tags as `-TAG`. Repeatable and comma-separated. |
-| `--site SITE` | `e621` or `e926`. Default: `e621` for `621`, `e926` for `926`. |
-| `--size MODE` | `preview`, `sample`, or `original`. Default: `sample`. |
-| `--resume` | Continue this query after its previous cursor, fetching the next requested count. |
-| `--dry-run` | Print the compiled query and exit. |
-| `--validate-tags` | Check concrete and wildcard tags against the tag API before fetching. |
+`fetch` runs both phases: everything `queue` does, then the download. It discovers posts, caches post JSON, fetches missing enrichment, evaluates the query, and writes the matching images to disk.
 
-Hidden compatibility aliases still work: `--continue` for `--resume`, `--or` for `--any`, and `--file` for `--size`.
+```text
+six2one fetch
 
-### Show metadata
+Query
+  dragon rating:s
+
+Phase 1/2: Discovering posts
+  Fetching result pages       48 / 48
+  Cached post JSON            3,812 posts
+  New image jobs              3,812
+  Already queued              0
+  Already downloaded          0
+  Skipped                     0
+
+Phase 2/2: Downloading images
+  Downloaded                  3,812 / 3,812
+  Failed                      0
+  Skipped existing files      0
+  Written                     7.42 GB
+
+Done.
+```
+
+`fetch` and `queue` both take `--limit N`, which caps a run at N posts; without it, six2one processes every page the query returns. Pick the image variant with `--file-type`:
 
 ```bash
-$ 621 show 6394158 
+$ 621 fetch "dragon rating:s" --file-type original
+$ 621 fetch "dragon rating:s" --file-type sample
+$ 621 fetch "dragon rating:s" --file-type preview
 ```
 
-`show` searches recursively under `./output` for six2one `manifest.json` files and returns a merged JSON view for matching posts. The `metadata` command is an alias. Each result combines the manifest post entry, `json/<id>.json` when present, a derived caption built from post tags, and filesystem-derived paths, existence flags, and file sizes.
-
-By default, `show` reads only what is already on disk. Use `--root` to search a narrower folder, `--all` to show every manifest entry under that root, and `--fetch` to fetch remote post JSON only when an ID is missing locally:
+Run already-queued work with `--queue`, and retry failed jobs with `--retry-failed`. Failed jobs are kept for inspection until you retry or clear them.
 
 ```bash
-$ 621 show --all --root output/fox-solo-safe
-
-# fetch from e926 if available there
-$ 926 show 6394158 --fetch  
+$ 621 fetch --queue
+$ 621 fetch --queue --retry-failed
 ```
 
-The merged object is filterable with dotted paths. Repeated filters and comma-separated filters are both accepted:
+### Export
 
 ```bash
-$ 621 show 6394158 \
-  --filter local.image.absolute_path \
-  --filter caption.text \
-  --filter post.file.url
-
-$ 621 show 6394158 -f local.image.absolute_path,caption.text,post.file.url
+$ 621 export "dragon rating:s" -o ./dragon-export
+$ 621 export -o ./all-downloaded
 ```
 
-Filtered keys flatten to their unique leaf names, so `caption.text` becomes `text`. If leaf names collide, six2one keeps enough path context to avoid overwriting values. Without filters, the full merged object is printed.
+`export` builds a clean folder of symlinks and cached post JSON. Given a query, it exports the downloaded images whose cached posts match; given none, it exports everything downloaded.
+
+The query is the same e621 language `fetch` and `queue` use, not a filename filter, so export can carve precise subsets out of the store:
 
 ```bash
-$ 621 show 6394158 -f local.image.absolute_path,caption.text,post.file.url --pretty
-
-# {
-#   "results": [
-#     {
-#       "absolute_path": "/Users/nollafox/output/fox-solo-safe/images/sample/000006394158.jpg",
-#       "text": "anthro, ... english_text, hi_res, signature",
-#       "url": "https://static1.e621.net/data/51/b5/51b5a2f0925e153c2890e37836024f77.jpg"
-#     }
-#   ]
-# }
+$ 621 export "dragon rating:s score:>100" -o ./high-score-dragons
+$ 621 export "fox ( ~dog ~cat ) -comic" -o ./fox-animal-overlap
+$ 621 export "notes:any rating:s" -o ./posts-with-notes
+$ 621 export "pool:* order:score" -o ./pool-posts
 ```
-That makes it easy to export a local dataset index for scripts, audits, or LoRA training prep.
 
+If a subset query needs cached data that is not present yet — notes, comments, pool membership — export fetches that enrichment before filtering. It never downloads images, though: it links what is already on disk and reports what is missing.
 
+```text
+dragon-export/
+  images/
+    000006407238/
+      original.png
+      sample.jpg
+      preview.jpg
+  posts/
+    000006407238.json
+```
 
-### Prune
+**Fetch broadly, export narrowly.** This is the workflow export is built for. Fetch one wide query, then slice it as many ways as you need — by score, by enrichment, by pool — without touching the network again:
 
 ```bash
-$ 621 prune [output_dir]
+$ 621 fetch "dragon rating:s" --limit 1000
+$ 621 export "dragon rating:s score:>100" -o ./best-dragons
+$ 621 export "dragon rating:s notes:any" -o ./noted-dragons
+$ 621 export "dragon rating:s pool:*" -o ./pool-dragons
 ```
-
-Prune scans the output folder for manifest entries whose recorded JSON or image files are incomplete. If a cached file is deleted by hand, `621 prune` removes the remaining recorded companions for that post and updates the manifest so a later fetch can repair the cache cleanly. If the output directory does not exist yet, prune creates it and exits.
 
 ## Development
 
-Install with Poetry:
+Install with Poetry, then run the CLI and tests from inside the environment:
 
 ```bash
 $ poetry install
-```
-
-Run the CLI, the tests, and the compile check from inside the Poetry environment:
-
-```bash
 $ poetry run 621 --help
-$ poetry run 926 fox solo --dry-run
-$ poetry run 621 show --help
-$ poetry run python -m unittest discover -s tests
-$ poetry run python -m compileall -q six2one
+$ poetry run 621 query explain "fox ( ~dog ~cat )"
+$ poetry run 621 fetch --help
+$ poetry run pytest
+$ poetry run python -m compileall -q src
 ```
 
 <br>
@@ -279,7 +388,7 @@ $ poetry run python -m compileall -q six2one
 ***
 
 <p align="center">
-  <strong>six2one</strong> - manifest-backed e621 and e926 fetching.
+  <strong>six2one</strong> — local e621 fetching, enrichment, and export.
 </p>
 
 <p align="center">

@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from six2one._commands.config import SixTwoOneConfig
+from six2one._commands.export import run_export
+from six2one.storage import create_storage
+from tests.factories import post_payload
+
+
+def test_export_symlinks_downloaded_images_and_writes_post_json(tmp_path: Path):
+    config = SixTwoOneConfig(home=tmp_path / "home")
+    source = _store_downloaded_image(config, post_id=1, tag="dragon", variant="preview", ext="jpg")
+
+    output = tmp_path / "export"
+    result = run_export(config, query="dragon", output_dir=output, e621=_NoopClient())
+
+    post_json = output / "posts" / "000000000001.json"
+    linked = output / "images" / "000000000001" / "preview.jpg"
+
+    assert result.matched_posts == 1
+    assert result.linked_images == 1
+    assert result.written_posts == 1
+    assert linked.is_symlink()
+    assert linked.resolve() == source.resolve()
+    assert json.loads(post_json.read_text(encoding="utf-8"))["id"] == 1
+
+
+def test_export_without_query_exports_all_downloaded_images(tmp_path: Path):
+    config = SixTwoOneConfig(home=tmp_path / "home")
+    _store_downloaded_image(config, post_id=2, tag="wolf")
+
+    result = run_export(config, query=None, output_dir=tmp_path / "export", e621=_NoopClient())
+
+    assert result.matched_posts == 1
+    assert result.linked_images == 1
+
+
+def test_export_skips_missing_image_file_but_still_writes_matching_post_json(tmp_path: Path):
+    config = SixTwoOneConfig(home=tmp_path / "home")
+    source = _store_downloaded_image(config, post_id=3, tag="dragon")
+    source.unlink()
+
+    output = tmp_path / "export"
+    result = run_export(config, query="dragon", output_dir=output, e621=_NoopClient())
+
+    assert result.matched_posts == 1
+    assert result.linked_images == 0
+    assert result.skipped_images == 1
+    assert (output / "posts" / "000000000003.json").exists()
+
+
+def test_export_does_not_overwrite_existing_image_path(tmp_path: Path):
+    config = SixTwoOneConfig(home=tmp_path / "home")
+    source = _store_downloaded_image(config, post_id=4, tag="dragon")
+    destination = tmp_path / "export" / "images" / "000000000004" / "original.png"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"keep me")
+
+    result = run_export(config, query="dragon", output_dir=tmp_path / "export", e621=_NoopClient())
+
+    assert result.matched_posts == 1
+    assert result.linked_images == 0
+    assert result.skipped_images == 1
+    assert destination.read_bytes() == b"keep me"
+    assert source.read_bytes() == b"image"
+
+
+class _NoopClient:
+    pass
+
+
+def _store_downloaded_image(
+    config: SixTwoOneConfig,
+    *,
+    post_id: int,
+    tag: str,
+    variant: str = "original",
+    ext: str = "png",
+) -> Path:
+    config.cache_dir.mkdir(parents=True, exist_ok=True)
+    config.images_dir.mkdir(parents=True, exist_ok=True)
+    source = config.images_dir / f"{post_id:012d}" / f"{variant}.{ext}"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"image")
+
+    with create_storage(config.storage_path) as storage:
+        storage.posts.upsert(post_payload(post_id, tag=tag))
+        storage.images.enqueue(
+            post_id,
+            _source_url(post_id, variant, ext),
+            variant=variant,
+            local_path=source,
+            file_ext=ext,
+        )
+        storage.images.mark_downloaded(post_id, variant=variant, local_path=source, bytes_written=5)
+
+    return source
+
+
+def _source_url(post_id: int, variant: str, ext: str) -> str:
+    if variant == "original":
+        return f"https://static.example/{post_id}.{ext}"
+    return f"https://static.example/{variant}/{post_id}.{ext}"

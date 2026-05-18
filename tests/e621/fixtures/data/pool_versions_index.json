@@ -1,0 +1,25 @@
+[
+  {
+    "added_post_ids": [
+      6411109
+    ],
+    "category": "collection",
+    "created_at": "2026-05-17T19:17:15.158-04:00",
+    "description": "",
+    "description_changed": false,
+    "id": 706825,
+    "is_active": true,
+    "is_locked": true,
+    "name": "Big_Talk_by_nimzy",
+    "name_changed": false,
+    "pool_id": 56312,
+    "post_ids": [
+      6411105,
+      6411109
+    ],
+    "removed_post_ids": [],
+    "updated_at": "2026-05-17T19:17:15.158-04:00",
+    "updater_id": 48753,
+    "version": 2
+  }
+]

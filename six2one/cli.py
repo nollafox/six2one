@@ -4,379 +4,283 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
-import re
 import sys
 import textwrap
 
-from .api import E621API
-from .auth import delete_login, save_login
-from .errors import Six2oneError, UsageError
-from .fetcher import FetchResult, run_fetch
-from .manifest import ManifestStartStatus
-from .models import (
-    CompiledQuery,
-    DEFAULT_FETCH_LIMIT,
-    DEFAULT_OUTPUT_DIR,
-    FetchConfig,
-    FileMode,
-    Rating,
-    Site,
+from ._commands.auth import AuthCommand
+from ._commands.bootstrap import BootstrapCommand
+from ._commands.explain import ExplainCommand
+from ._commands.export import format_export_result, run_export
+from ._commands.config import SixTwoOneConfig
+from ._commands.errors import CommandError
+from ._commands.fetch import format_fetch_queue_result, format_fetch_result, run_fetch, run_fetch_queue
+from ._commands.queue import (
+    format_queue_clear_preview,
+    format_queue_clear_result,
+    format_queue_list,
+    format_queue_result,
+    run_queue,
+    run_queue_clear,
+    run_queue_list,
 )
-from .prune import PruneResult, prune_output
-from .query import compile_query, split_csv_values, validate_compiled_query
-from .show import ShowConfig, render_show_result, show_with_client, split_filter_values
+from .models import (
+    DEFAULT_FETCH_LIMIT,
+    FileMode,
+    Site,
+    TOOL_VERSION,
+)
 
 
 SINGLE_DASH_TAG_PREFIX = "__six2one_tag__:"
 FETCH_COMMAND = "fetch"
-LOGIN_COMMAND = "login"
-LOGOUT_COMMAND = "logout"
-METADATA_COMMAND = "metadata"
-PRUNE_COMMAND = "prune"
-SHOW_COMMAND = "show"
-DOCUMENTED_COMMANDS = {FETCH_COMMAND, LOGIN_COMMAND, LOGOUT_COMMAND, METADATA_COMMAND, PRUNE_COMMAND, SHOW_COMMAND}
+EXPORT_COMMAND = "export"
+AUTH_COMMAND = "auth"
+BOOTSTRAP_COMMAND = "bootstrap"
+QUERY_COMMAND = "query"
+QUEUE_COMMAND = "queue"
+DOCUMENTED_COMMANDS = {
+    AUTH_COMMAND,
+    BOOTSTRAP_COMMAND,
+    EXPORT_COMMAND,
+    FETCH_COMMAND,
+    QUERY_COMMAND,
+    QUEUE_COMMAND,
+}
 OPTIONS_REQUIRING_VALUE = {
-    "-o",
-    "--out",
     "-n",
+    "-o",
     "--limit",
-    "--rating",
-    "--author",
-    "--artist",
-    "--by",
-    "--any",
-    "--or",
-    "-x",
-    "--exclude",
-    "--site",
+    "--out",
     "--size",
-    "--file",
+    "--file-type",
 }
-SHORT_OPTIONS_WITH_ATTACHED_VALUES = ("-o", "-n", "-x")
+SHORT_OPTIONS_WITH_ATTACHED_VALUES = ("-n", "-o")
 KNOWN_SHORT_FLAGS = {"-h"}
-RATING_SHORTCUTS = ("safe", "questionable", "explicit")
-RATING_LABELS = {
-    Rating.SAFE: "safe",
-    Rating.QUESTIONABLE: "questionable",
-    Rating.EXPLICIT: "explicit",
-}
-SLUG_PATTERN = re.compile(r"[^A-Za-z0-9_]+")
 
-TOP_LEVEL_DESCRIPTION = """Fetch posts from e621/e926 into a manifest-backed image dataset."""
+
+def package_version() -> str:
+    return TOOL_VERSION
+
+TOP_LEVEL_DESCRIPTION = """Queue, enrich, and fetch e621 posts into the local six2one store."""
 TOP_LEVEL_EPILOG = """
 Examples:
-  {prog} login USERNAME YOUR_API_KEY
-  {prog} fox solo --safe
-  {prog} fox --any cat,dog --exclude watermark,comic
-  {prog} dragon solo --explicit --all --resume
-  {prog} fetch fox solo --safe --out ./datasets/fox-study
-  {prog} show 6394158 -f caption.text --raw
-  {prog} prune ./output
+  {prog} auth
+  {prog} bootstrap
+  {prog} queue "dragon rating:s" --limit 10
+  {prog} fetch "dragon rating:s" --limit 10
+  {prog} export "dragon rating:s" -o ./dragon-export
+  {prog} fetch --queue
 """
 FETCH_DESCRIPTION = """
-Fetch posts from e621/e926 into a manifest-backed image dataset.
-
-Tag terms are passed through to the site search syntax, including negation,
-wildcards, explicit OR terms, and grouped OR syntax.
+Discover posts for an e621 query, cache post JSON, enqueue needed enrichment and
+image jobs, then run the queue for that source run.
 """
 FETCH_EPILOG = """
 Examples:
-  {prog} fox solo --safe
-  {prog} fox --any cat,dog --exclude watermark,comic
-  {prog} fox solo --safe --limit 1000
-  {prog} red_panda african_wild_dog --author some_artist
-  {prog} dragon solo --explicit --all --resume
-  {prog} fetch fox solo --safe --out ./datasets/fox-study
+  {prog} fetch "dragon rating:s" --limit 10
+  {prog} export "dragon rating:s" -o ./dragon-export
+  {prog} fetch --queue
+  {prog} fetch --queue --retry-failed
 
 Notes:
-  Always writes manifest.json for resume, dedupe, and future dataset operations.
-  Existing manifests are reused as a cache across searches.
+  Results are stored in ~/.six2one/cache/six2one.sqlite and images are written
+  under ~/.six2one/images.
+  After fetch completes, use export to symlink matching downloaded images and
+  write their cached post JSON into an output directory.
 """
-LOGIN_DESCRIPTION = """Save e621 API credentials in the six2one project root."""
-LOGIN_EPILOG = """
-The login file is written to .six2one-login.json next to the installed/source
-six2one project root, independent of the directory where 621 is run.
-It is used for Basic auth and for a username-specific User-Agent.
-"""
-LOGOUT_DESCRIPTION = """Delete the saved six2one project e621 API credentials."""
-PRUNE_DESCRIPTION = """Remove manifest entries with incomplete cached files."""
-PRUNE_EPILOG = """
-Prune creates missing output directories, removes incomplete cached JSON/image
-files, and updates manifest.json when present so a later fetch can repair them.
-"""
-SHOW_DESCRIPTION = """Display merged metadata for downloaded posts."""
-SHOW_EPILOG = """
+QUEUE_DESCRIPTION = """Discover/cache query results and enqueue work without downloading images."""
+QUEUE_EPILOG = """
 Examples:
-  {prog} show 6394158 --pretty
-  {prog} metadata 6394158 -f caption.text --raw
-  {prog} show --all --root output/fox-solo-safe -f id,local.image.absolute_path,caption.text,post.rating --jsonl
-
-By default, show only searches local manifests. Use --fetch to request missing
-post JSON from the selected site without writing it locally.
+  {prog} queue "dragon rating:s" --limit 10
+  {prog} queue list
+  {prog} queue list --failed
+  {prog} queue clear --failed --yes
 """
-
+EXPORT_DESCRIPTION = """Export downloaded images and cached post JSON matching a query."""
+EXPORT_EPILOG = """
+Examples:
+  {prog} export "dragon rating:s" -o ./dragon-export
+  {prog} export -o ./all-downloaded
+"""
+AUTH_DESCRIPTION = """Configure e621 API credentials for six2one commands."""
+AUTH_EPILOG = """
+Examples:
+  {prog} auth
+  {prog} auth --test
+  {prog} auth --remove
+"""
 
 def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.ArgumentParser:
     """Build the six2one CLI parser."""
     parser = argparse.ArgumentParser(
         prog=prog,
-        usage=f"{prog} [fetch] [TAGS ...] [options]",
+        usage=f"{prog} COMMAND [options]",
         description=TOP_LEVEL_DESCRIPTION,
         epilog=textwrap.dedent(TOP_LEVEL_EPILOG).strip().format(prog=prog),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {package_version()}")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    login_parser = subparsers.add_parser(
-        LOGIN_COMMAND,
-        help="save e621 API credentials",
-        description=LOGIN_DESCRIPTION,
-        epilog=textwrap.dedent(LOGIN_EPILOG).strip(),
+    bootstrap_parser = subparsers.add_parser(
+        BOOTSTRAP_COMMAND,
+        help="initialize the local six2one workspace",
+        description="Initialize six2one config, cache storage, image storage, and the e621 tag database.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
-    login_parser.add_argument("username", help="e621 username")
-    login_parser.add_argument("api_key", help="e621 API key")
+    bootstrap_parser.add_argument("--no-progress", action="store_true", help="disable live progress output")
+    bootstrap_parser.add_argument("--verbose", action="store_true", help="print extra diagnostic output")
+    bootstrap_parser.add_argument("--json", action="store_true", help="write the final result as JSON")
 
-    subparsers.add_parser(
-        LOGOUT_COMMAND,
-        help="delete saved e621 API credentials",
-        description=LOGOUT_DESCRIPTION,
+    auth_parser = subparsers.add_parser(
+        AUTH_COMMAND,
+        help="configure e621 API credentials",
+        description=textwrap.dedent(AUTH_DESCRIPTION).strip(),
+        epilog=textwrap.dedent(AUTH_EPILOG).strip().format(prog=prog),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
+    auth_parser.add_argument("--username", help=argparse.SUPPRESS)
+    auth_parser.add_argument("--api-token", dest="api_token", help=argparse.SUPPRESS)
+    auth_parser.add_argument("--test", action="store_true", help="test stored credentials")
+    auth_parser.add_argument("--remove", action="store_true", help="remove stored credentials")
+    auth_parser.add_argument("--yes", action="store_true", help="do not prompt before removing credentials")
 
-    prune_parser = subparsers.add_parser(
-        PRUNE_COMMAND,
-        help="delete incomplete cached post entries",
-        description=PRUNE_DESCRIPTION,
-        epilog=textwrap.dedent(PRUNE_EPILOG).strip(),
+    query_parser = subparsers.add_parser(
+        QUERY_COMMAND,
+        help="inspect e621-style query syntax",
+        description="Inspect e621-style query syntax without fetching or downloading anything.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
-    prune_parser.add_argument(
-        "output_dir",
-        nargs="?",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help="output directory to prune; default: ./output",
-    )
-
-    show_parser = subparsers.add_parser(
-        SHOW_COMMAND,
-        aliases=(METADATA_COMMAND,),
-        help="display merged post metadata",
-        description=SHOW_DESCRIPTION,
-        epilog=textwrap.dedent(SHOW_EPILOG).strip().format(prog=prog),
+    query_subparsers = query_parser.add_subparsers(dest="query_command", required=True)
+    explain_parser = query_subparsers.add_parser(
+        "explain",
+        help="parse, bind, and explain a query",
+        description="Parse, bind, and explain an e621-style query.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
-    show_parser.add_argument(
-        "post_ids",
-        nargs="*",
-        metavar="POST_ID",
-        help="post IDs to show; zero padding is accepted",
-    )
-    show_parser.add_argument(
-        "--all",
-        action="store_true",
-        help="show every post recorded in local manifests under --root",
-    )
-    show_parser.add_argument(
-        "--root",
-        default=str(DEFAULT_OUTPUT_DIR),
-        metavar="DIR",
-        help="root directory to search recursively; default: ./output",
-    )
-    show_parser.add_argument(
-        "--fetch",
-        action="store_true",
-        help="fetch remote post JSON when a requested ID is not found locally",
-    )
-    show_parser.add_argument(
-        "--save",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    show_parser.add_argument(
-        "--site",
-        choices=tuple(site.value for site in Site),
-        default=default_site.value,
-        metavar="SITE",
-        help=f"site to query for --fetch: e621 or e926; default: {default_site.value}",
-    )
-    show_parser.add_argument(
-        "-f",
-        "--filter",
-        dest="filters",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="select dotted paths from each result; repeatable and comma-separated values accepted",
-    )
-    show_parser.add_argument(
-        "--pretty",
-        action="store_true",
-        help="print indented JSON",
-    )
-    show_parser.add_argument(
-        "--jsonl",
-        action="store_true",
-        help="print one result object per line",
-    )
-    show_parser.add_argument(
-        "--raw",
-        action="store_true",
-        help="print one selected value; requires exactly one result and one filter",
-    )
+    explain_parser.add_argument("query", metavar="QUERY", help="e621-style query to explain")
+    explain_parser.add_argument("--compact", action="store_true", help="print a compact one-line explanation")
+    explain_parser.add_argument("--json", action="store_true", help="write the explanation as JSON")
+    explain_parser.add_argument("--no-progress", action="store_true", help=argparse.SUPPRESS)
+    explain_parser.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
 
     fetch_parser = subparsers.add_parser(
         FETCH_COMMAND,
-        help="download posts",
-        usage=f"{prog} [fetch] [TAGS ...] [options]",
+        help="discover, enqueue, and download posts",
+        usage=f"{prog} fetch [QUERY] [options]",
         description=textwrap.dedent(FETCH_DESCRIPTION).strip(),
         epilog=textwrap.dedent(FETCH_EPILOG).strip().format(prog=prog),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
     fetch_parser.add_argument(
-        "tags",
+        "query",
         nargs="*",
-        metavar="TAGS",
-        help="e621 tag query terms; supports -tag, ~tag, wildcards, and grouped OR syntax",
-    )
-    fetch_parser.add_argument(
-        "-o",
-        "--out",
-        default=None,
-        metavar="DIR",
-        help="output directory; default: ./output/<query-slug>",
+        metavar="QUERY",
+        help="e621 query to fetch; quote it to preserve grouping and metatag syntax",
     )
     fetch_parser.add_argument(
         "-n",
         "--limit",
         type=int,
         metavar="N",
-        help=f"number of posts to fetch; default: {DEFAULT_FETCH_LIMIT}",
+        default=DEFAULT_FETCH_LIMIT,
+        help=f"maximum number of posts to discover; default: {DEFAULT_FETCH_LIMIT}",
     )
     fetch_parser.add_argument(
-        "--all",
+        "--file-type",
+        choices=tuple(file_mode.value for file_mode in FileMode),
+        default=FileMode.ORIGINAL.value,
+        dest="image_variant",
+        metavar="MODE",
+        help="file type to download: original, sample, or preview; default: original",
+    )
+    fetch_parser.add_argument(
+        "--queue",
         action="store_true",
-        help="fetch until the query is exhausted",
+        help="download already queued jobs instead of discovering a new query",
     )
     fetch_parser.add_argument(
-        "--safe",
+        "--retry-failed",
         action="store_true",
-        help="shortcut for --rating safe",
+        help="with --queue, retry failed image jobs as well as pending jobs",
     )
-    fetch_parser.add_argument(
-        "--questionable",
-        action="store_true",
-        help="shortcut for --rating questionable",
+
+    export_parser = subparsers.add_parser(
+        EXPORT_COMMAND,
+        help="export downloaded images and cached post JSON",
+        usage=f"{prog} export [QUERY] -o OUTPUT_DIR",
+        description=textwrap.dedent(EXPORT_DESCRIPTION).strip(),
+        epilog=textwrap.dedent(EXPORT_EPILOG).strip().format(prog=prog),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
-    fetch_parser.add_argument(
-        "--explicit",
-        action="store_true",
-        help="shortcut for --rating explicit",
+    export_parser.add_argument(
+        "query",
+        nargs="*",
+        metavar="QUERY",
+        help="optional e621 query; omit it to export all downloaded images",
     )
-    fetch_parser.add_argument(
-        "--rating",
-        choices=("safe", "questionable", "explicit", "s", "q", "e"),
-        metavar="RATING",
-        help="restrict by rating: safe/questionable/explicit or s/q/e",
+    export_parser.add_argument(
+        "-o",
+        "--out",
+        required=True,
+        dest="output_dir",
+        metavar="DIR",
+        help="directory that will receive image symlinks and post JSON",
     )
-    fetch_parser.add_argument(
-        "--author",
-        "--artist",
-        "--by",
-        dest="artists",
-        action="append",
-        default=[],
-        metavar="NAME",
-        help="add an artist tag to the search; repeatable",
+
+    queue_parser = subparsers.add_parser(
+        QUEUE_COMMAND,
+        help="discover and enqueue query work",
+        usage=f"{prog} queue [QUERY | list | clear [TARGET]] [options]",
+        description=textwrap.dedent(QUEUE_DESCRIPTION).strip(),
+        epilog=textwrap.dedent(QUEUE_EPILOG).strip().format(prog=prog),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
-    fetch_parser.add_argument(
-        "--any",
-        dest="or_tags",
-        action="append",
-        default=[],
-        metavar="TAG",
-        help="add OR terms as ~TAG; repeatable and comma-separated values accepted",
+    queue_parser.add_argument(
+        "queue_args",
+        nargs="*",
+        metavar="QUERY",
+        help="query to queue, or one of: list, clear",
     )
-    fetch_parser.add_argument(
-        "--or",
-        dest="or_tags",
-        action="append",
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS,
+    queue_parser.add_argument(
+        "-n",
+        "--limit",
+        type=int,
+        default=DEFAULT_FETCH_LIMIT,
+        metavar="N",
+        help=f"maximum number of posts to discover; default: {DEFAULT_FETCH_LIMIT}",
     )
-    fetch_parser.add_argument(
-        "-x",
-        "--exclude",
-        action="append",
-        default=[],
-        metavar="TAG",
-        help="exclude a tag as -TAG; repeatable and comma-separated values accepted",
-    )
-    fetch_parser.add_argument(
-        "--site",
-        choices=tuple(site.value for site in Site),
-        default=default_site.value,
-        metavar="SITE",
-        help=f"site to query: e621 or e926; default: {default_site.value}",
-    )
-    fetch_parser.add_argument(
+    queue_parser.add_argument(
         "--size",
         choices=tuple(file_mode.value for file_mode in FileMode),
-        default=FileMode.SAMPLE.value,
-        dest="file_mode",
+        default=FileMode.ORIGINAL.value,
+        dest="image_variant",
         metavar="MODE",
-        help="image variant to download: preview, sample, or original; default: sample",
+        help="image variant to enqueue: preview, sample, or original; default: original",
     )
-    fetch_parser.add_argument(
-        "--file",
-        choices=tuple(file_mode.value for file_mode in FileMode),
-        dest="file_mode",
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS,
-    )
-    fetch_parser.add_argument(
-        "--resume",
-        dest="continue_existing",
+    queue_parser.add_argument(
+        "--failed",
         action="store_true",
-        help="continue this query after its previous cursor",
+        help="with list or clear, operate on failed image jobs",
     )
-    fetch_parser.add_argument(
-        "--continue",
-        dest="continue_existing",
+    queue_parser.add_argument(
+        "--compact",
         action="store_true",
-        help=argparse.SUPPRESS,
+        help="with list, print a compact table",
     )
-    fetch_parser.add_argument(
-        "--dry-run",
+    queue_parser.add_argument(
+        "--yes",
         action="store_true",
-        help="print the compiled query and exit without fetching",
-    )
-    fetch_parser.add_argument(
-        "--validate-tags",
-        action="store_true",
-        help="check concrete and wildcard tags against the tag API before fetching",
+        help="with clear, apply the change without prompting",
     )
     return parser
-
-
-def parse_fetch_config(argv: Sequence[str], default_site: Site = Site.E621) -> FetchConfig:
-    """Parse CLI argv into a validated fetch config.
-
-    Raises:
-        SystemExit: If argparse rejects the command line.
-        UsageError: If parsed values are inconsistent.
-    """
-    parser = build_parser(default_site=default_site)
-    normalized_argv = _normalize_fetch_argv(tuple(argv))
-    namespace = parser.parse_args(_protect_single_dash_tags(normalized_argv))
-    if namespace.command != FETCH_COMMAND:
-        raise UsageError(f"Unsupported command: {namespace.command}")
-    return _config_from_namespace(namespace)
 
 
 async def main(argv: Sequence[str] | None = None, default_site: Site | None = None, prog: str | None = None) -> int:
@@ -388,39 +292,20 @@ async def main(argv: Sequence[str] | None = None, default_site: Site | None = No
         parser = build_parser(prog=command_name, default_site=site_default)
         normalized_argv = _normalize_fetch_argv(raw_argv)
         namespace = parser.parse_args(_protect_single_dash_tags(normalized_argv))
-        if namespace.command == LOGIN_COMMAND:
-            path = save_login(namespace.username, namespace.api_key)
-            sys.stdout.write(f"Saved login file: {path}\n")
-            return 0
-        if namespace.command == LOGOUT_COMMAND:
-            path = delete_login()
-            sys.stdout.write(f"Deleted login file: {path}\n")
-            return 0
-        if namespace.command == PRUNE_COMMAND:
-            result = prune_output(Path(namespace.output_dir))
-            _write_prune_result(result)
-            return 0
-        if namespace.command in {SHOW_COMMAND, METADATA_COMMAND}:
-            config = _show_config_from_namespace(namespace)
-            if config.fetch_remote:
-                async with E621API(config.site) as api:
-                    result = await show_with_client(config, api)
-            else:
-                result = await show_with_client(config)
-            sys.stdout.write(render_show_result(result, config))
-            return 0
-        if namespace.command != FETCH_COMMAND:
-            raise UsageError(f"Unsupported command: {namespace.command}")
-        config = _config_from_namespace(namespace)
-        query = compile_query(config)
-        if config.dry_run:
-            warnings = await _validate_dry_run_if_requested(config, query)
-            _write_dry_run(query.compiled, warnings)
-            return 0
-        result = await run_fetch(config)
-        _write_fetch_result(result)
-        return 0
-    except Six2oneError as error:
+        if namespace.command == BOOTSTRAP_COMMAND:
+            return BootstrapCommand.from_args(namespace).run()
+        if namespace.command == QUERY_COMMAND and namespace.query_command == "explain":
+            return ExplainCommand.from_args(namespace).run()
+        if namespace.command == QUEUE_COMMAND:
+            return _run_queue_command(namespace)
+        if namespace.command == FETCH_COMMAND:
+            return _run_fetch_command(namespace)
+        if namespace.command == EXPORT_COMMAND:
+            return _run_export_command(namespace)
+        if namespace.command == AUTH_COMMAND:
+            return AuthCommand.from_args(namespace).run()
+        raise CommandError(f"Unsupported command: {namespace.command}")
+    except CommandError as error:
         sys.stderr.write(f"error: {error}\n")
         return 1
 
@@ -437,145 +322,107 @@ def _command_name(prog: str | None) -> str:
 
 
 def _default_site_for_command(command_name: str) -> Site:
-    if command_name == "926":
-        return Site.E926
     return Site.E621
 
 
-def _config_from_namespace(namespace: argparse.Namespace) -> FetchConfig:
-    limit = _limit_from_namespace(namespace)
-    rating = _rating_from_namespace(namespace)
-    tags = _restore_single_dash_tags(namespace.tags)
-    artist_tags = tuple(namespace.artists)
-    or_tags = split_csv_values(namespace.or_tags, "any")
-    exclude_tags = split_csv_values(namespace.exclude, "exclude")
-    output_dir = _output_dir_from_namespace(namespace, tags, artist_tags, or_tags, exclude_tags, rating)
-    return FetchConfig(
-        tags=tags,
-        output_dir=output_dir,
-        limit=limit,
-        rating=rating,
-        artist_tags=artist_tags,
-        or_tags=or_tags,
-        exclude_tags=exclude_tags,
-        site=Site.from_value(namespace.site),
-        file_mode=FileMode.from_value(namespace.file_mode),
-        continue_existing=namespace.continue_existing,
-        dry_run=namespace.dry_run,
-        validate_tags=namespace.validate_tags,
+def _run_fetch_command(namespace: argparse.Namespace) -> int:
+    config = SixTwoOneConfig.from_args(namespace)
+    if namespace.retry_failed and not namespace.queue:
+        raise CommandError("--retry-failed can only be used with --queue")
+    if namespace.queue:
+        if namespace.query:
+            raise CommandError("fetch --queue does not take a query")
+        result = run_fetch_queue(config, retry_failed=namespace.retry_failed)
+        sys.stdout.write(format_fetch_queue_result(result) + "\n")
+        return 0
+
+    query = _query_from_parts(namespace.query, command="fetch")
+    result = run_fetch(
+        config,
+        query,
+        image_variant=namespace.image_variant,
+        limit=_limit_from_value(namespace.limit),
     )
+    sys.stdout.write(format_fetch_result(result) + "\n")
+    return 0
 
 
-def _show_config_from_namespace(namespace: argparse.Namespace) -> ShowConfig:
-    return ShowConfig(
-        post_ids=tuple(_post_id_from_cli(value) for value in namespace.post_ids),
-        root=Path(namespace.root),
-        include_all=namespace.all,
-        fetch_remote=namespace.fetch,
-        save_remote=namespace.save,
-        site=Site.from_value(namespace.site),
-        filters=split_filter_values(tuple(namespace.filters)),
-        pretty=namespace.pretty,
-        jsonl=namespace.jsonl,
-        raw=namespace.raw,
+def _run_export_command(namespace: argparse.Namespace) -> int:
+    result = run_export(
+        SixTwoOneConfig.from_args(namespace),
+        query=_optional_query_from_parts(namespace.query),
+        output_dir=namespace.output_dir,
     )
+    sys.stdout.write(format_export_result(result) + "\n")
+    return 0
 
 
-def _post_id_from_cli(value: str) -> int:
-    if not value.isdigit():
-        raise UsageError(f"Post ID must be a number: {value!r}")
-    return int(value)
+def _run_queue_command(namespace: argparse.Namespace) -> int:
+    config = SixTwoOneConfig.from_args(namespace)
+    args = _restore_single_dash_tags(namespace.queue_args)
+    action = args[0] if args else None
 
+    if action == "list":
+        if len(args) > 1:
+            raise CommandError("queue list does not take a query")
+        result = run_queue_list(config, failed=namespace.failed, compact=namespace.compact)
+        sys.stdout.write(format_queue_list(result) + "\n")
+        return 0
 
-def _limit_from_namespace(namespace: argparse.Namespace) -> int | None:
-    if namespace.all and namespace.limit not in (None, 0):
-        raise UsageError("--all cannot be used with a positive --limit")
-    if namespace.all or namespace.limit == 0:
-        return None
-    if namespace.limit is None:
+    if action == "clear":
+        target = " ".join(args[1:]) or None
+        result = run_queue_clear(config, target=target, failed=namespace.failed, yes=namespace.yes)
+        if namespace.yes:
+            sys.stdout.write(format_queue_clear_result(result) + "\n")
+        else:
+            sys.stdout.write(format_queue_clear_preview(result) + "\n")
+        return 0
+
+    if namespace.failed:
+        raise CommandError("--failed can only be used with queue list or queue clear")
+    if namespace.compact:
+        raise CommandError("--compact can only be used with queue list")
+    if namespace.yes:
+        raise CommandError("--yes can only be used with queue clear")
+
+    query = _query_from_parts(args, command="queue")
+    result = run_queue(
+        config,
+        query,
+        image_variant=namespace.image_variant,
+        limit=_limit_from_value(namespace.limit),
+    )
+    sys.stdout.write(format_queue_result(result) + "\n")
+    return 0
+
+def _limit_from_value(value: int | None) -> int | None:
+    if value is None:
         return DEFAULT_FETCH_LIMIT
-    if namespace.limit < 0:
-        raise UsageError("--limit must be zero or greater")
-    return namespace.limit
-
-
-def _rating_from_namespace(namespace: argparse.Namespace) -> Rating | None:
-    shortcut_values = [
-        shortcut for shortcut in RATING_SHORTCUTS if getattr(namespace, shortcut)
-    ]
-    if namespace.rating is not None and shortcut_values:
-        raise UsageError("--rating cannot be used with rating shortcut flags")
-    if len(shortcut_values) > 1:
-        raise UsageError("Only one rating shortcut can be used")
-    if shortcut_values:
-        return Rating.from_value(shortcut_values[0])
-    if namespace.rating is None:
+    if value < 0:
+        raise CommandError("--limit must be zero or greater")
+    if value == 0:
         return None
-    return Rating.from_value(namespace.rating)
+    return value
 
 
-def _output_dir_from_namespace(
-    namespace: argparse.Namespace,
-    tags: tuple[str, ...],
-    artist_tags: tuple[str, ...],
-    or_tags: tuple[str, ...],
-    exclude_tags: tuple[str, ...],
-    rating: Rating | None,
-) -> Path:
-    if namespace.out is not None:
-        return Path(namespace.out)
-    return DEFAULT_OUTPUT_DIR / _query_slug(tags, artist_tags, or_tags, exclude_tags, rating)
+def _query_from_parts(parts: Sequence[str], *, command: str) -> str:
+    query = " ".join(_restore_single_dash_tags(parts)).strip()
+    if not query:
+        raise CommandError(f"{command} requires a query")
+    return query
 
 
-def _query_slug(
-    tags: tuple[str, ...],
-    artist_tags: tuple[str, ...],
-    or_tags: tuple[str, ...],
-    exclude_tags: tuple[str, ...],
-    rating: Rating | None,
-) -> str:
-    terms = list(tags)
-    terms.extend(artist_tags)
-    terms.extend(_slug_or_tag(tag) for tag in or_tags)
-    terms.extend(_slug_exclude_tag(tag) for tag in exclude_tags)
-    if rating is not None:
-        terms.append(RATING_LABELS[rating])
-    slug_parts = [_slug_part(term) for term in terms]
-    populated_parts = [part for part in slug_parts if part]
-    if not populated_parts:
-        raise UsageError("fetch requires at least one tag or search option")
-    return "-".join(populated_parts)
-
-
-def _slug_part(value: str) -> str:
-    normalized_value = value.strip().lower()
-    normalized_value = normalized_value.removeprefix("~")
-    normalized_value = normalized_value.removeprefix("-")
-    slug = SLUG_PATTERN.sub("-", normalized_value).strip("-")
-    return slug
-
-
-def _slug_or_tag(value: str) -> str:
-    return f"any-{value.removeprefix('~')}"
-
-
-def _slug_exclude_tag(value: str) -> str:
-    return f"not-{value.removeprefix('-')}"
+def _optional_query_from_parts(parts: Sequence[str]) -> str | None:
+    query = " ".join(_restore_single_dash_tags(parts)).strip()
+    return query or None
 
 
 def _normalize_fetch_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
-    if not argv:
-        return argv
-    first_token = argv[0]
-    if first_token in {"-h", "--help"}:
-        return argv
-    if first_token in DOCUMENTED_COMMANDS:
-        return argv
-    return (FETCH_COMMAND, *argv)
+    return argv
 
 
 def _protect_single_dash_tags(argv: tuple[str, ...]) -> tuple[str, ...]:
-    if not argv or argv[0] != FETCH_COMMAND:
+    if not argv or argv[0] not in {EXPORT_COMMAND, FETCH_COMMAND, QUEUE_COMMAND}:
         return argv
     protected_tokens = [argv[0]]
     expecting_value = False
@@ -640,52 +487,3 @@ def _should_protect_as_tag(token: str) -> bool:
     if token == "-":
         return False
     return True
-
-
-async def _validate_dry_run_if_requested(config: FetchConfig, query: CompiledQuery) -> tuple[str, ...]:
-    if not config.validate_tags:
-        return ()
-    async with E621API(config.site) as api:
-        return await validate_compiled_query(api, query)
-
-
-def _write_dry_run(compiled_query: str, warnings: tuple[str, ...]) -> None:
-    sys.stdout.write(f"Compiled query: {compiled_query}\n")
-    for warning in warnings:
-        sys.stderr.write(f"warning: {warning}\n")
-
-
-def _write_fetch_result(result: FetchResult) -> None:
-    requested_limit_text = _requested_limit_text(result.requested_limit)
-    if result.manifest_found:
-        sys.stdout.write(f"Found {result.manifest_path}\n")
-    if result.start_status is ManifestStartStatus.RESUME:
-        sys.stdout.write(f"Same compiled query: {result.compiled_query}\n")
-        sys.stdout.write(
-            "Continuing after "
-            f"{result.starting_downloaded_count}/{requested_limit_text} downloaded\n"
-        )
-    elif result.start_status is ManifestStartStatus.SEARCH:
-        sys.stdout.write(f"Using manifest cache for: {result.compiled_query}\n")
-    for warning in result.warnings:
-        sys.stderr.write(f"warning: {warning}\n")
-    sys.stdout.write(
-        f"Downloaded {result.downloaded_count}/{requested_limit_text} posts "
-        f"({result.media_downloaded_count} media files fetched, "
-        f"{result.skipped_count} skipped)\n"
-    )
-
-
-def _requested_limit_text(requested_limit: int | None) -> str:
-    if requested_limit is None:
-        return "unlimited"
-    return str(requested_limit)
-
-
-def _write_prune_result(result: PruneResult) -> None:
-    sys.stdout.write(
-        f"Pruned {len(result.pruned_post_ids)} posts "
-        f"and deleted {len(result.deleted_files)} files from {result.output_dir}\n"
-    )
-    if result.manifest_updated:
-        sys.stdout.write("Updated manifest.json\n")

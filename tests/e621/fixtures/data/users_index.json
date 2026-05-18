@@ -1,0 +1,18 @@
+[
+  {
+    "avatar_id": 6401069,
+    "base_upload_limit": 10,
+    "can_approve_posts": false,
+    "can_upload_free": false,
+    "created_at": "2025-07-21T10:33:47.968-04:00",
+    "id": 2328751,
+    "is_banned": false,
+    "is_verified": true,
+    "level": 20,
+    "level_string": "Member",
+    "name": "StarlightRose",
+    "note_update_count": 0,
+    "post_update_count": 37,
+    "post_upload_count": 10
+  }
+]

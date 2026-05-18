@@ -1,0 +1,139 @@
+{
+  "post": {
+    "approver_id": null,
+    "change_seq": 76605035,
+    "comment_count": 1,
+    "created_at": "2026-05-16T09:12:15.748-04:00",
+    "description": "Lila Flare ref sheet \n\nLila Flare just appeared at the Temple one day without anyone noticing, her Aura's energy signature is similar to that of Nexus' core itself.\n\n\nSupport me at https://ko-fi.com/starlightroseuwu or https://patreon.com/starlightroseuwu <3",
+    "duration": null,
+    "fav_count": 1,
+    "file": {
+      "ext": "png",
+      "height": 1700,
+      "md5": "b75e9d31b415e590b5997ac4ca30c2a4",
+      "size": 788053,
+      "url": "https://static1.e621.net/data/b7/5e/b75e9d31b415e590b5997ac4ca30c2a4.png",
+      "width": 2500
+    },
+    "flags": {
+      "deleted": false,
+      "flagged": false,
+      "note_locked": false,
+      "pending": true,
+      "rating_locked": false,
+      "status_locked": false
+    },
+    "has_notes": false,
+    "id": 6407238,
+    "is_favorited": false,
+    "locked_tags": [],
+    "pools": [],
+    "preview": {
+      "alt": "https://static1.e621.net/data/preview/b7/5e/b75e9d31b415e590b5997ac4ca30c2a4.webp",
+      "height": 256,
+      "url": "https://static1.e621.net/data/preview/b7/5e/b75e9d31b415e590b5997ac4ca30c2a4.jpg",
+      "width": 376
+    },
+    "rating": "s",
+    "relationships": {
+      "children": [],
+      "has_active_children": false,
+      "has_children": false,
+      "parent_id": null
+    },
+    "sample": {
+      "alt": "https://static1.e621.net/data/sample/b7/5e/b75e9d31b415e590b5997ac4ca30c2a4.webp",
+      "alternates": {},
+      "has": true,
+      "height": 850,
+      "url": "https://static1.e621.net/data/sample/b7/5e/b75e9d31b415e590b5997ac4ca30c2a4.jpg",
+      "width": 1250
+    },
+    "score": {
+      "down": 0,
+      "total": 2,
+      "up": 2
+    },
+    "sources": [
+      "https://www.furaffinity.net/view/65020769/",
+      "https://bsky.app/profile/did:plc:qk5abbpxngz5j3yicbz7u5ub",
+      "https://bsky.app/profile/did:plc:qk5abbpxngz5j3yicbz7u5ub/post/3mlxvpv46322u",
+      "https://furaffinity.net/user/starlightr0se"
+    ],
+    "tags": {
+      "artist": [
+        "starlightrose"
+      ],
+      "character": [
+        "lila_flare_(starlightrose)"
+      ],
+      "contributor": [],
+      "copyright": [
+        "european_mythology",
+        "legends_of_nexus",
+        "mythology"
+      ],
+      "general": [
+        "blue_body",
+        "blue_fur",
+        "blue_hair",
+        "color_swatch",
+        "crotch_tuft",
+        "dagger",
+        "fantasy",
+        "female",
+        "front_view",
+        "fur",
+        "hair",
+        "horn",
+        "magic",
+        "melee_weapon",
+        "multiple_angles",
+        "nude",
+        "off/on",
+        "pawpads",
+        "pink_horn",
+        "purple_body",
+        "purple_scales",
+        "rear_view",
+        "red_body",
+        "red_fur",
+        "scales",
+        "solo",
+        "text",
+        "three-quarter_view",
+        "tuft",
+        "weapon",
+        "wings"
+      ],
+      "invalid": [],
+      "lore": [],
+      "meta": [
+        "artist_name",
+        "character_name",
+        "english_text",
+        "hi_res",
+        "model_sheet"
+      ],
+      "species": [
+        "canid",
+        "canine",
+        "draekon",
+        "dragon",
+        "fox",
+        "hybrid",
+        "mammal",
+        "mythological_creature",
+        "mythological_scalie",
+        "red_fox",
+        "reptile",
+        "scalie",
+        "true_fox",
+        "western_dragon"
+      ]
+    },
+    "updated_at": "2026-05-16T13:44:58.378-04:00",
+    "uploader_id": 2328751,
+    "uploader_name": "StarlightRose"
+  }
+}

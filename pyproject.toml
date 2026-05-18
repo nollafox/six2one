@@ -10,7 +10,8 @@ requires-python = ">=3.10"
 dependencies = [
     "aiohttp>=3.13.5,<4.0.0",
     "aiofiles>=25.1.0,<26.0.0",
-    "tqdm>=4.67.3,<5.0.0"
+    "tqdm>=4.67.3,<5.0.0",
+    "rich (>=15.0.0,<16.0.0)"
 ]
 keywords = ["e621", "e926", "dataset", "downloader", "cli", "manifest"]
 classifiers = [

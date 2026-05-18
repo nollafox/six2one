@@ -1,0 +1,23 @@
+[
+  {
+    "artist": {
+      "created_at": "2026-05-17T18:31:28.603-04:00",
+      "creator_id": 1314348,
+      "group_name": "",
+      "id": 119571,
+      "is_active": true,
+      "is_locked": false,
+      "linked_user_id": null,
+      "name": "shiba_the_dog",
+      "other_names": [],
+      "updated_at": "2026-05-17T18:31:28.625-04:00"
+    },
+    "artist_id": 119571,
+    "created_at": "2026-05-17T18:31:28.620-04:00",
+    "id": 483089,
+    "is_active": true,
+    "normalized_url": "http://x.com/shiba_the_dog/",
+    "updated_at": "2026-05-17T18:31:28.620-04:00",
+    "url": "https://x.com/shiba_the_dog"
+  }
+]

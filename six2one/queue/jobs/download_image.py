@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from hashlib import md5
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -9,15 +11,16 @@ from six2one.storage.models import ImageVariant
 
 
 class DownloadImageJob(Job):
-    kind = JobKind.DOWNLOAD_IMAGE.value
+    kind = JobKind.DOWNLOAD_ORIGINAL
     title = "Download image"
+    variant = ImageVariant.ORIGINAL
 
     def validate_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(payload)
         missing = {"post_id", "variant", "source_url", "destination"} - data.keys()
         if missing:
             raise ValueError(f"download_image requires {', '.join(sorted(missing))}")
-        data["variant"] = ImageVariant(data["variant"]).value
+        data["variant"] = _variant_from_value(data["variant"]).storage_name
         return data
 
     def display(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -53,20 +56,20 @@ class DownloadImageJob(Job):
         # pass the exact target path and record the returned final path.
         downloaded = Path(context.e621.transport.download_url(source_url, path))
         bytes_written = downloaded.stat().st_size if downloaded.exists() else None
-        checksum = expected_md5 or md5
+        checksum = _file_md5(downloaded)
+        expected = (expected_md5 or md5 or "").lower()
+        if expected and checksum != expected:
+            downloaded.unlink(missing_ok=True)
+            raise RuntimeError(f"Downloaded image checksum mismatch for post {post_id}: expected {expected}, got {checksum}")
 
-        context.store.images.mark_downloaded(
+        image_variant = _variant_from_value(variant)
+        context.store.files.mark_downloaded(
             post_id,
-            variant=variant,
+            variant=image_variant,
             local_path=downloaded,
-            bytes_written=bytes_written,
+            bytes_written=bytes_written or 0,
             checksum=checksum,
-            source_url=source_url,
-            file_ext=file_ext,
-            width=width,
-            height=height,
-            size_bytes=size_bytes,
-            md5=md5,
+            downloaded_at=datetime.now(timezone.utc),
         )
         return JobResult(
             message=f"Downloaded {variant} image for post {post_id}",
@@ -77,3 +80,38 @@ class DownloadImageJob(Job):
                 "bytes": bytes_written,
             },
         )
+
+
+class DownloadSampleImageJob(DownloadImageJob):
+    kind = JobKind.DOWNLOAD_SAMPLE
+    variant = ImageVariant.SAMPLE
+
+
+class DownloadPreviewImageJob(DownloadImageJob):
+    kind = JobKind.DOWNLOAD_PREVIEW
+    variant = ImageVariant.PREVIEW
+
+
+def _variant_from_value(value: object) -> ImageVariant:
+    if isinstance(value, ImageVariant):
+        return value
+    if isinstance(value, int):
+        return ImageVariant(value)
+    if isinstance(value, str):
+        variants = {
+            ImageVariant.ORIGINAL.storage_name: ImageVariant.ORIGINAL,
+            ImageVariant.SAMPLE.storage_name: ImageVariant.SAMPLE,
+            ImageVariant.PREVIEW.storage_name: ImageVariant.PREVIEW,
+        }
+        normalized = value.strip().lower()
+        if normalized in variants:
+            return variants[normalized]
+    raise ValueError(f"Unsupported image variant: {value!r}")
+
+
+def _file_md5(path: Path) -> str:
+    digest = md5()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()

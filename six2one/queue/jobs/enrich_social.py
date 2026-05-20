@@ -6,7 +6,7 @@ from ..models import JobKind
 
 
 class EnrichFavoritesJob(Job):
-    kind = JobKind.ENRICH_FAVORITES.value
+    kind = JobKind.ENRICH_FAVORITES
     title = "Enrich favorites"
 
     def run(self, context, *, post_ids: list[int] | None = None, user_id: int | None = None, source_run_id: str | None = None) -> JobResult:
@@ -21,7 +21,7 @@ class EnrichFavoritesJob(Job):
 
 
 class EnrichPostVotesJob(Job):
-    kind = JobKind.ENRICH_POST_VOTES.value
+    kind = JobKind.ENRICH_POST_VOTES
     title = "Enrich post votes"
 
     def run(self, context, *, post_ids: list[int], source_run_id: str | None = None) -> JobResult:

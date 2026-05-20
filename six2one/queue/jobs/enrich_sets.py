@@ -8,7 +8,7 @@ from ..models import JobKind
 
 
 class EnrichSetsJob(Job):
-    kind = JobKind.ENRICH_SETS.value
+    kind = JobKind.ENRICH_SETS
     title = "Enrich sets"
 
     def run(self, context, *, post_ids: list[int] | None = None, set_ids: list[int] | None = None, source_run_id: str | None = None) -> JobResult:

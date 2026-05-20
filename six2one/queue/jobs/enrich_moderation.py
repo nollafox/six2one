@@ -29,28 +29,28 @@ class _ModerationJob(Job):
 
 
 class EnrichPostFlagsJob(_ModerationJob):
-    kind = JobKind.ENRICH_POST_FLAGS.value
+    kind = JobKind.ENRICH_POST_FLAGS
     title = "Enrich post flags"
     manager_name = "post_flags"
     store_name = "post_flags"
 
 
 class EnrichPostEventsJob(_ModerationJob):
-    kind = JobKind.ENRICH_POST_EVENTS.value
+    kind = JobKind.ENRICH_POST_EVENTS
     title = "Enrich post events"
     manager_name = "post_events"
     store_name = "post_events"
 
 
 class EnrichPostVersionsJob(_ModerationJob):
-    kind = JobKind.ENRICH_POST_VERSIONS.value
+    kind = JobKind.ENRICH_POST_VERSIONS
     title = "Enrich post versions"
     manager_name = "post_versions"
     store_name = "post_versions"
 
 
 class EnrichPostApprovalsJob(_ModerationJob):
-    kind = JobKind.ENRICH_POST_APPROVALS.value
+    kind = JobKind.ENRICH_POST_APPROVALS
     title = "Enrich post approvals"
     manager_name = "post_approvals"
     store_name = "post_approvals"

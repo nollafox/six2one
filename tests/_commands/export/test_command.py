@@ -6,7 +6,9 @@ from pathlib import Path
 from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.export import run_export
 from six2one.storage import create_storage
+from six2one.storage.models import ImageVariant
 from tests.factories import post_payload
+from tests.support import import_test_posts, mark_test_image_downloaded
 
 
 def test_export_symlinks_downloaded_images_and_writes_post_json(tmp_path: Path):
@@ -86,20 +88,20 @@ def _store_downloaded_image(
     source.write_bytes(b"image")
 
     with create_storage(config.storage_path) as storage:
-        storage.posts.upsert(post_payload(post_id, tag=tag))
-        storage.images.enqueue(
+        import_test_posts(storage, post_payload(post_id, tag=tag))
+        storage.files.mark_pending(
             post_id,
-            _source_url(post_id, variant, ext),
-            variant=variant,
+            _variant(variant),
             local_path=source,
-            file_ext=ext,
         )
-        storage.images.mark_downloaded(post_id, variant=variant, local_path=source, bytes_written=5)
+        mark_test_image_downloaded(storage, post_id=post_id, variant=variant, local_path=source, bytes_written=5)
 
     return source
 
 
-def _source_url(post_id: int, variant: str, ext: str) -> str:
-    if variant == "original":
-        return f"https://static.example/{post_id}.{ext}"
-    return f"https://static.example/{variant}/{post_id}.{ext}"
+def _variant(name: str) -> ImageVariant:
+    return {
+        "original": ImageVariant.ORIGINAL,
+        "sample": ImageVariant.SAMPLE,
+        "preview": ImageVariant.PREVIEW,
+    }[name]

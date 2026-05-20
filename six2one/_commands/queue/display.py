@@ -159,7 +159,7 @@ def format_queue_clear_preview(preview: QueueClearPreview) -> str:
         if preview.failed_only:
             return "There are no failed image jobs.\n\nNothing was changed."
         return "The queue has no pending or failed image jobs.\n\nNothing was changed."
-    if preview.target and not preview.target.startswith("q_"):
+    if preview.target and not preview.target.isdigit():
         lines = ["Matched queued image jobs", "", "Filter", f"  {preview.target}", "", "Source runs affected", f"  {preview.source_runs_affected}", "", f"This will remove {_n(preview.matching_image_jobs)} pending image jobs from the queue."]
     elif preview.source_run:
         run = preview.source_run
@@ -175,7 +175,7 @@ def format_queue_clear_preview(preview: QueueClearPreview) -> str:
 def format_queue_clear_result(result: QueueClearResult) -> str:
     if result.failed_only:
         headline = "Failed image jobs removed."
-    elif result.target and result.target.startswith("q_"):
+    elif result.target and result.target.isdigit():
         headline = "Cleared image jobs for source run."
     elif result.target:
         headline = "Removed matching queued image jobs."

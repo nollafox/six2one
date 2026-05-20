@@ -8,7 +8,7 @@ from ..models import JobKind
 
 
 class EnrichCommentsJob(Job):
-    kind = JobKind.ENRICH_COMMENTS.value
+    kind = JobKind.ENRICH_COMMENTS
     title = "Enrich comments"
 
     def validate_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:

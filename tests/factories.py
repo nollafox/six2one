@@ -90,15 +90,29 @@ class EmptySearchManager:
         return SearchResult([])
 
 
+class FakePoolsManager:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int | None, int | None]] = []
+
+    def get(self, id: int) -> dict[str, Any]:
+        self.calls.append((id, None))
+        return {"id": id, "name": f"pool_{id}", "post_ids": []}
+
+    def search(self, *, post_id: int | None = None, **_: Any) -> SearchResult:
+        self.calls.append((None, post_id))
+        return SearchResult([{"id": 4, "name": "fox_and_the_grapes", "post_ids": [post_id]}] if post_id is not None else [])
+
+
 class DownloadTransport:
-    def __init__(self, body: bytes = b"image") -> None:
+    def __init__(self, body: bytes = b"image", bodies_by_url: dict[str, bytes] | None = None) -> None:
         self.body = body
+        self.bodies_by_url = dict(bodies_by_url or {})
         self.downloads: list[tuple[str, Path]] = []
 
     def download_url(self, url: str, destination: str | Path) -> Path:
         path = Path(destination)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(self.body)
+        path.write_bytes(self.bodies_by_url.get(url, self.body))
         self.downloads.append((url, path))
         return path
 
@@ -107,4 +121,20 @@ class FakeE621:
     def __init__(self, posts: list[dict[str, Any]] | None = None) -> None:
         self.posts = FakePostsManager(posts)
         self.comments = EmptySearchManager()
-        self.transport = DownloadTransport()
+        self.pools = FakePoolsManager()
+        self.transport = DownloadTransport(bodies_by_url=_download_bodies(self.posts.posts))
+
+
+def _download_bodies(posts: list[dict[str, Any]]) -> dict[str, bytes]:
+    known = {
+        hashlib.md5(ORIGINAL_BYTES).hexdigest(): ORIGINAL_BYTES,
+        hashlib.md5(b"image-bytes").hexdigest(): b"image-bytes",
+    }
+    bodies: dict[str, bytes] = {}
+    for post in posts:
+        file_data = post.get("file") or {}
+        url = file_data.get("url")
+        digest = file_data.get("md5")
+        if url and digest in known:
+            bodies[str(url)] = known[str(digest)]
+    return bodies

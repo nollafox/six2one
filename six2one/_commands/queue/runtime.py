@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import traceback
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Iterable
 
 from six2one.queue import JobContext, Queue, default_registry
 from six2one.queue.models import JobKind, JobState
 from six2one.storage.stores import Storage
+
+from .planning import _DOWNLOAD_JOB_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +91,7 @@ def run_jobs(
             storage.queue.complete(record.id, metadata=result.metadata, message=result.message)
             completed += 1
             completed_ids.append(record.id)
-            if record.kind == JobKind.DOWNLOAD_IMAGE.value:
+            if record.kind in _DOWNLOAD_JOB_KINDS:
                 downloaded += 1
                 byte_value = result.metadata.get("bytes") if isinstance(result.metadata, dict) else None
                 if isinstance(byte_value, int):
@@ -98,7 +101,7 @@ def run_jobs(
             storage.queue.fail(record.id, message)
             failed += 1
             failed_ids.append(record.id)
-            if record.kind == JobKind.DOWNLOAD_IMAGE.value:
+            if record.kind in _DOWNLOAD_JOB_KINDS:
                 failed_images += 1
 
     return RunJobsSummary(
@@ -123,28 +126,17 @@ def _runnable_jobs(
     retry_failed: bool,
     image_only: bool,
 ):
-    states: list[JobState] = [JobState.PENDING, JobState.RETRYING]
+    states: list[JobState] = [JobState.READY]
     if retry_failed:
         states.append(JobState.FAILED)
     records = list(storage.queue.list(states=states, source_run_id=source_run_id))
     if image_only:
-        records = [record for record in records if record.kind == JobKind.DOWNLOAD_IMAGE.value]
+        records = [record for record in records if record.kind in _DOWNLOAD_JOB_KINDS]
     return records
 
 
-def _mark_running(storage: Storage, job_id: str) -> None:
-    storage.database.execute(
-        """
-        UPDATE queue_jobs
-        SET state = ?,
-            started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
-            attempts = attempts + 1,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        """,
-        (JobState.RUNNING.value, job_id),
-    )
-    storage.database.commit()
+def _mark_running(storage: Storage, job_id) -> None:
+    storage.queue.mark_leased(job_id, worker_id="command", lease_for=timedelta(minutes=10))
 
 
 def human_bytes(size: int) -> str:

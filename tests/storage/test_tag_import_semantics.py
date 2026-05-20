@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from six2one.storage import open_storage
 from tests.support import initialized_config, install_semantic_tags
 
 
 def test_import_aliases_and_implications_are_used_by_query_resolution(store):
-    store.tags.replace_from_exports(
+    store.tags.import_exports(
         tags=[
             {"id": 1, "name": "domestic_cat", "category": 5},
             {"id": 2, "name": "tabby_cat", "category": 5},
@@ -24,7 +26,7 @@ def test_import_aliases_and_implications_are_used_by_query_resolution(store):
 
 
 def test_import_builds_transitive_implication_closure(store):
-    store.tags.replace_from_exports(
+    store.tags.import_exports(
         tags=[
             {"id": 1, "name": "animal", "category": 5},
             {"id": 2, "name": "mammal", "category": 5},
@@ -44,7 +46,7 @@ def test_import_builds_transitive_implication_closure(store):
 
 
 def test_import_records_unresolved_implications(store):
-    result = store.tags.replace_from_exports(
+    result = store.tags.import_exports(
         tags=[{"id": 1, "name": "wolf", "category": 5}],
         implications=[{"id": 1, "antecedent_name": "wolf", "consequent_name": "missing_tag", "status": "active"}],
         export_date="2026-05-18",
@@ -58,7 +60,7 @@ def test_import_records_unresolved_implications(store):
 
 
 def test_import_cycle_does_not_infinite_loop(store):
-    store.tags.replace_from_exports(
+    store.tags.import_exports(
         tags=[{"id": 1, "name": "a", "category": 0}, {"id": 2, "name": "b", "category": 0}],
         implications=[
             {"id": 1, "antecedent_name": "a", "consequent_name": "b", "status": "active"},
@@ -67,24 +69,48 @@ def test_import_cycle_does_not_infinite_loop(store):
         export_date="2026-05-18",
     )
 
-    assert store.tags.implies("a").names == ("b", "a")
+    assert store.tags.implies("a").names == ("b",)
     assert store.tags.status().ready is True
 
 
-def test_import_replaces_snapshot_atomically_from_consumer_perspective(tmp_path):
+def test_import_upserts_snapshot_without_destroying_existing_tag_cache(tmp_path):
     config = initialized_config(tmp_path)
     install_semantic_tags(config)
 
     with open_storage(config.storage_path) as storage:
         before = storage.tags.status()
-        storage.tags.replace_from_exports(
+        storage.tags.import_exports(
             tags=[{"id": 10, "name": "fresh_tag", "category": 0}],
             aliases=[],
             implications=[],
             export_date="2026-05-19",
         )
         after = storage.tags.status()
+        fresh = storage.tags.get_by_name("fresh_tag")
+        existing = storage.tags.get_by_name("domestic_cat")
 
     assert before.tags_count > 1
     assert after.ready is True
-    assert after.tags_count == 1
+    assert after.tags_count == before.tags_count + 1
+    assert fresh is not None
+    assert existing is not None
+
+
+def test_failed_tag_import_does_not_clear_existing_tag_graph(tmp_path):
+    config = initialized_config(tmp_path)
+    install_semantic_tags(config)
+
+    with open_storage(config.storage_path) as storage:
+        before = storage.tags.resolve("dog")
+        with pytest.raises(ValueError, match="Invalid integer"):
+            storage.tags.import_exports(
+                tags=[{"id": "not-an-int", "name": "bad_tag", "category": 0}],
+                aliases=[],
+                implications=[],
+                export_date="2026-05-19",
+            )
+        after = storage.tags.resolve("dog")
+
+    assert before.alias_applied is True
+    assert after.alias_applied is True
+    assert after.canonical_name == "domestic_dog"

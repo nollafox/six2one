@@ -1,15 +1,29 @@
-"""Business-facing storage APIs."""
+from __future__ import annotations
 
-from .store import Storage
-from .queue import QueueStore
-from .source_runs import SourceRunsStore
-from .posts import PostsStore
-from .enrichment import EnrichmentStore
-from .images import ImagesStore
-from .metadata import MetadataStore
-from .tags import TagsStore
+from .files import FileRepository
+from .collections import CollectionRepository
+from .coverage import EnrichmentCoverageRepository
+from .imports import ImportRepository
+from .maintenance import MaintenanceRepository
+from .metadata import MetadataRepository
+from .posts import PostQueryBuilder, PostRepository
+from .queue import QueueRepository
+from .source_runs import SourceRunRepository
+from .store import Storage, Store
+from .tags import TagRepository
 
 __all__ = [
-    "Storage", "QueueStore", "SourceRunsStore", "PostsStore", "EnrichmentStore",
-    "ImagesStore", "MetadataStore", "TagsStore",
+    "FileRepository",
+    "CollectionRepository",
+    "EnrichmentCoverageRepository",
+    "ImportRepository",
+    "MaintenanceRepository",
+    "MetadataRepository",
+    "PostQueryBuilder",
+    "PostRepository",
+    "QueueRepository",
+    "SourceRunRepository",
+    "Storage",
+    "Store",
+    "TagRepository",
 ]

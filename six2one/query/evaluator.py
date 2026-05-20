@@ -71,6 +71,7 @@ class QueryDataProvider(Protocol):
     def favorites_for(self, post_id: int) -> Iterable[Mapping[str, Any]]: ...
     def votes_for(self, post_id: int) -> Iterable[Mapping[str, Any]]: ...
     def approvals_for(self, post_id: int) -> Iterable[Mapping[str, Any]]: ...
+    def pools_for(self, post_id: int) -> Iterable[Mapping[str, Any]]: ...
     def sets_for(self, post_id: int) -> Iterable[Mapping[str, Any]]: ...
     def replacements_for(self, post_id: int) -> Iterable[Mapping[str, Any]]: ...
     def deletion_events_for(self, post_id: int) -> Iterable[Mapping[str, Any]]: ...
@@ -86,6 +87,7 @@ class EmptyQueryData:
     def favorites_for(self, post_id: int) -> tuple[Mapping[str, Any], ...]: return ()
     def votes_for(self, post_id: int) -> tuple[Mapping[str, Any], ...]: return ()
     def approvals_for(self, post_id: int) -> tuple[Mapping[str, Any], ...]: return ()
+    def pools_for(self, post_id: int) -> tuple[Mapping[str, Any], ...]: return ()
     def sets_for(self, post_id: int) -> tuple[Mapping[str, Any], ...]: return ()
     def replacements_for(self, post_id: int) -> tuple[Mapping[str, Any], ...]: return ()
     def deletion_events_for(self, post_id: int) -> tuple[Mapping[str, Any], ...]: return ()
@@ -163,6 +165,8 @@ class QueryEvaluator:
         if isinstance(node, HashFieldPredicate):
             return _eq(_file_md5(post), node.value.value)
         if isinstance(node, PresenceFieldPredicate):
+            if node.field is PresenceField.POOL:
+                return bool(post.get("pools") or self.data.pools_for(_post_id(post))) is node.value.value
             return _presence(post, node.field) is node.value.value
         if isinstance(node, BooleanFieldPredicate):
             return _boolean_field(post, node.field) is node.value.value
@@ -239,7 +243,8 @@ class QueryEvaluator:
 
     def _collection(self, node: CollectionPredicate, post: Mapping[str, Any]) -> bool:
         if node.collection is CollectionKind.POOL:
-            return _collection_ref_matches(node.ref, post.get("pools") or [])
+            pool_rows = self.data.pools_for(_post_id(post))
+            return _collection_ref_matches(node.ref, post.get("pools") or [], rows=pool_rows)
         if node.collection is CollectionKind.SET:
             return any(_collection_ref_matches(node.ref, (row.get("id"), row.get("name"), row.get("shortname"))) for row in self.data.sets_for(_post_id(post)))
         return False
@@ -527,12 +532,15 @@ def _lock(node: LockPredicate, post: Mapping[str, Any]) -> bool:
     return bool(flags.get(mapping[node.lock]) if isinstance(flags, Mapping) else post.get(mapping[node.lock])) is node.value.value
 
 
-def _collection_ref_matches(ref: Any, values: Iterable[Any]) -> bool:
+def _collection_ref_matches(ref: Any, values: Iterable[Any], *, rows: Iterable[Mapping[str, Any]] = ()) -> bool:
     vals = tuple(values or ())
     if hasattr(ref, "id"):
-        return any(str(value) == str(ref.id) for value in vals)
+        return any(str(value) == str(ref.id) for value in vals) or any(str(row.get("id")) == str(ref.id) for row in rows)
     if isinstance(ref, CollectionName):
-        return any(str(value).lower() == ref.name.lower() for value in vals)
+        target = ref.name.lower()
+        return any(str(value).lower() == target for value in vals) or any(
+            str(row.get("name") or row.get("shortname") or "").lower() == target for row in rows
+        )
     return False
 
 

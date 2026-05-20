@@ -3,36 +3,63 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .config import StoreConfig
 from .database import SQLite
-from .stores.store import Storage
+from .database.migration import pending_migrations
+from .stores.store import Store
 
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 
 
 @dataclass(frozen=True, slots=True)
 class StorageStatus:
-    """Validation result for a six2one storage database."""
+    """Validation result for an e621 storage database."""
 
     ready: bool
     path: Path
     diagnostics: tuple[str, ...]
 
 
-def create_storage(path: str | Path) -> Storage:
+def create_storage(
+    path: str | Path,
+    *,
+    on_migration=None,
+    config: StoreConfig | None = None,
+) -> Store:
     """Create or open a storage database and apply migrations."""
 
-    db = SQLite.connect(path)
-    db.run_migrations(MIGRATIONS_DIR)
-    store = Storage(db)
-    store.metadata.set_default("schema", "storage", "1")
-    store.metadata.set_default("tags", "schema_version", "1")
+    store_config = config or StoreConfig.from_path(path)
+    db = SQLite.connect(store_config)
+    db.run_migrations(MIGRATIONS_DIR, on_migration=on_migration)
+    store = Store(db)
+    store.metadata.set_default("schema", "storage", "2")
+    store.metadata.set_default("schema", "layout", "hot-cold-sqlite")
     return store
 
 
-def open_storage(path: str | Path, *, read_only: bool = False) -> Storage:
-    """Open an existing storage database."""
+def open_store(path: str | Path, *, read_only: bool = False) -> Store:
+    """Open an existing storage database without applying migrations."""
 
-    return Storage(SQLite.connect(path, read_only=read_only))
+    return Store.open(StoreConfig.from_path(path, read_only=read_only))
+
+
+def open_storage(path: str | Path, *, read_only: bool = False) -> Store:
+    """Compatibility alias for callers that still use the storage name."""
+
+    return open_store(path, read_only=read_only)
+
+
+def pending_storage_migrations(path: str | Path) -> tuple[str, ...]:
+    """Return pending storage migration versions for an existing database."""
+
+    db_path = Path(path).expanduser()
+    if not db_path.exists():
+        return ()
+    db = SQLite.connect(StoreConfig.from_path(db_path))
+    try:
+        return tuple(migration.version for migration in pending_migrations(db, MIGRATIONS_DIR))
+    finally:
+        db.close()
 
 
 def validate_storage(path: str | Path) -> StorageStatus:
@@ -45,14 +72,17 @@ def validate_storage(path: str | Path) -> StorageStatus:
 
     required = {
         "schema_migrations",
-        "storage_metadata",
+        "schema_metadata",
         "source_runs",
         "posts",
+        "tags",
+        "post_tag_edges",
+        "post_files",
         "queue_jobs",
-        "enrichment_coverage",
+        "import_runs",
     }
-    with open_storage(db_path, read_only=True) as store:
-        tables = store.metadata.table_names()
+    with open_store(db_path, read_only=True) as store:
+        tables = store.maintenance.table_names()
         missing = sorted(required - tables)
         if missing:
             diagnostics.append("MISSING_TABLES:" + ",".join(missing))

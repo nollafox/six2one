@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from math import ceil
 from typing import Any, Iterable, Mapping
 
-from six2one.query import E621QueryLanguage, filter_posts
+from six2one.query import E621QueryLanguage
 from six2one.query.ast import Occurrence, ScopeExpr, TagPredicate
 from six2one.queue import Queue, default_registry
 from six2one.queue.models import JobKind, JobState
-from six2one.storage.models import EnrichmentState, ImageVariant
+from six2one.storage.models import ImageVariant, PostLoad, SourceRunId
 from six2one.storage.stores import Storage
 
 from six2one._commands.config import SixTwoOneConfig
@@ -35,20 +35,20 @@ LOCAL_DATA_DEPENDENCIES = frozenset(
     }
 )
 
-POST_SCOPED_DEPENDENCY_JOBS: dict[str, tuple[str, ...]] = {
-    "CommentsIndex": (JobKind.ENRICH_COMMENTS.value,),
-    "NotesIndex": (JobKind.ENRICH_NOTES.value, JobKind.ENRICH_NOTE_VERSIONS.value),
-    "ApprovalsIndex": (JobKind.ENRICH_POST_APPROVALS.value,),
+POST_SCOPED_DEPENDENCY_JOBS: dict[str, tuple[JobKind, ...]] = {
+    "CommentsIndex": (JobKind.ENRICH_COMMENTS,),
+    "NotesIndex": (JobKind.ENRICH_NOTES, JobKind.ENRICH_NOTE_VERSIONS),
+    "ApprovalsIndex": (JobKind.ENRICH_POST_APPROVALS,),
     "DeletionMetadata": (
-        JobKind.ENRICH_POST_FLAGS.value,
-        JobKind.ENRICH_POST_EVENTS.value,
-        JobKind.ENRICH_POST_VERSIONS.value,
+        JobKind.ENRICH_POST_FLAGS,
+        JobKind.ENRICH_POST_EVENTS,
+        JobKind.ENRICH_POST_VERSIONS,
     ),
-    "PoolIndex": (JobKind.ENRICH_POOLS.value,),
-    "SetIndex": (JobKind.ENRICH_SETS.value,),
-    "ReplacementIndex": (JobKind.ENRICH_REPLACEMENTS.value,),
-    "FavoritesIndex": (JobKind.ENRICH_FAVORITES.value,),
-    "VotesIndex": (JobKind.ENRICH_POST_VOTES.value,),
+    "PoolIndex": (JobKind.ENRICH_POOLS,),
+    "SetIndex": (JobKind.ENRICH_SETS,),
+    "ReplacementIndex": (JobKind.ENRICH_REPLACEMENTS,),
+    "FavoritesIndex": (JobKind.ENRICH_FAVORITES,),
+    "VotesIndex": (JobKind.ENRICH_POST_VOTES,),
 }
 
 
@@ -102,38 +102,33 @@ def queue_query_work(
 
     compiled = compile_query(storage, query)
     dependencies = tuple(_dependency_kind(dep) for dep in compiled.bound.data_dependencies)
-    variant = ImageVariant(image_variant).value
+    variant = _image_variant_from_name(image_variant)
 
-    posts = _fetch_posts(e621, query, limit=limit)
-    stored_posts = storage.posts.upsert_many(posts)
-    post_ids = tuple(post.id for post in stored_posts)
-    page_size = min(limit or 320, 320)
-    discovered_pages = None if not stored_posts else max(1, ceil(len(stored_posts) / max(page_size, 1)))
-
-    source_run = storage.source_runs.create(
-        query,
-        state="pending",
-        backend="web → sqlite",
+    canonical_query = _canonical_query(compiled)
+    source_run = storage.source_runs.start(
+        query=query,
+        state_id=0,
+        backend_id=1,
         metadata={
-            "image_variant": variant,
-            "dependencies": dependencies,
-            "discovered_pages": discovered_pages,
             "raw_query": query,
-            "normalized_query": _canonical_query(compiled),
-            "canonical_query": _canonical_query(compiled),
+            "normalized_query": canonical_query,
+            "canonical_query": canonical_query,
             "bound_query_json": _bound_query_metadata(compiled),
-            "diagnostics": [
-                {"code": diagnostic.code.value, "message": diagnostic.message, "severity": diagnostic.severity.value}
-                for diagnostic in compiled.diagnostics
-            ],
+            "image_variant": variant.storage_name,
         },
     )
+    posts = _fetch_posts(e621, query, limit=limit)
+    report = storage.imports.import_posts(posts, source_run_id=source_run.id)
+    post_ids = tuple(_post_id(post) for post in posts)
+    stored_posts = storage.posts.get_many(post_ids, load=PostLoad.full())
+    page_size = min(limit or 320, 320)
+    discovered_pages = None if not stored_posts else max(1, ceil(len(stored_posts) / max(page_size, 1)))
 
     queue = Queue(storage, default_registry())
     enrichment_jobs = _enqueue_enrichment_jobs(
         storage=storage,
         queue=queue,
-        source_run_id=source_run.id,
+        source_run_id=str(int(source_run.id)),
         dependencies=dependencies,
         post_ids=post_ids,
         stored_posts=stored_posts,
@@ -143,7 +138,7 @@ def queue_query_work(
         # No auxiliary data is missing, so evaluate immediately and enqueue
         # download_image jobs now. Queries with missing dependencies get an
         # evaluate_query job that runs after enrichment jobs complete.
-        matches = filter_posts(compiled, stored_posts)
+        matches = storage.posts.matching(compiled, ids=post_ids)
         image_counts = _enqueue_image_jobs(
             config=config,
             storage=storage,
@@ -155,7 +150,7 @@ def queue_query_work(
         eval_jobs = 0
         storage.source_runs.update_state(source_run.id, "evaluated", total_candidates=len(stored_posts), total_matches=len(matches))
     else:
-        image_counts = {"new_image_jobs": 0, "already_queued": 0, "already_downloaded": sum(1 for post in stored_posts if storage.images.exists(post.id, variant)), "skipped": 0}
+        image_counts = {"new_image_jobs": 0, "already_queued": 0, "already_downloaded": sum(1 for post in stored_posts if storage.files.exists(int(post.id), variant)), "skipped": 0}
         eval_jobs = _enqueue_evaluation_job(
             config=config,
             queue=queue,
@@ -171,11 +166,11 @@ def queue_query_work(
     return QueuePlanResult(
         source_run_id=source_run.id,
         query=query,
-        image_variant=variant,
+        image_variant=variant.storage_name,
         dependencies=dependencies,
         counts=EnqueuePlanCounts(
             discovered_pages=discovered_pages,
-            cached_posts=len(stored_posts),
+            cached_posts=report.accepted,
             new_image_jobs=image_counts["new_image_jobs"],
             already_queued=image_counts["already_queued"],
             already_downloaded=image_counts["already_downloaded"],
@@ -269,21 +264,21 @@ def _enqueue_evaluation_job(
     *,
     config: SixTwoOneConfig,
     queue: Queue,
-    source_run_id: str,
+    source_run_id: SourceRunId,
     query: str,
     post_ids: tuple[int, ...],
-    image_variant: str,
+    image_variant: ImageVariant,
 ) -> int:
     if not post_ids:
         return 0
     queue.enqueue(
-        JobKind.EVALUATE_QUERY.value,
+        JobKind.EVALUATE_QUERY,
         {
             "query": query,
-            "source_run_id": source_run_id,
+            "source_run_id": int(source_run_id),
             "post_ids": list(post_ids),
             "download": True,
-            "image_variant": image_variant,
+            "image_variant": image_variant.storage_name,
             "destination": str(config.images_dir),
         },
         source_run_id=source_run_id,
@@ -296,51 +291,45 @@ def _enqueue_enrichment_jobs(
     *,
     storage: Storage,
     queue: Queue,
-    source_run_id: str,
+    source_run_id: SourceRunId,
     dependencies: Iterable[str],
     post_ids: tuple[int, ...],
     stored_posts: tuple[Any, ...],
 ) -> int:
     remote = tuple(dep for dep in dependencies if dep not in LOCAL_DATA_DEPENDENCIES)
     post_scoped = tuple(dep for dep in remote if dep in POST_SCOPED_DEPENDENCY_JOBS)
-    missing = storage.enrichment.missing(post_ids=post_ids, dependencies=post_scoped)
-
     count = 0
-    for need in missing:
-        ids = [int(key) for key in need.keys]
-        storage.enrichment.mark_pending(scope="post", keys=ids, dependency=need.dependency, source_run_id=source_run_id)
-        for kind in POST_SCOPED_DEPENDENCY_JOBS[need.dependency]:
+    for dependency in post_scoped:
+        ids = storage.coverage.missing_post_ids(post_ids=post_ids, dependency=dependency)
+        if not ids:
+            continue
+        storage.coverage.mark_posts_pending(post_ids=ids, dependency=dependency, source_run_id=source_run_id)
+        for kind in POST_SCOPED_DEPENDENCY_JOBS[dependency]:
             queue.enqueue(
                 kind,
-                {"post_ids": ids, "source_run_id": source_run_id},
+                {"post_ids": list(ids), "source_run_id": int(source_run_id)},
                 source_run_id=source_run_id,
                 priority=20,
             )
             count += 1
 
     if "UserIndex" in remote:
-        user_ids = _missing_keys(storage, scope="user", keys=_user_ids_from_posts(stored_posts), dependency="UserIndex")
-        if user_ids:
-            storage.enrichment.mark_pending(scope="user", keys=user_ids, dependency="UserIndex", source_run_id=source_run_id)
-            queue.enqueue(
-                JobKind.ENRICH_USERS.value,
-                {"user_ids": list(user_ids), "source_run_id": source_run_id},
-                source_run_id=source_run_id,
-                priority=20,
-            )
-            count += 1
+        queue.enqueue(
+            JobKind.ENRICH_USERS,
+            {"source_run_id": int(source_run_id)},
+            source_run_id=source_run_id,
+            priority=20,
+        )
+        count += 1
 
     if "ArtistVerificationIndex" in remote:
-        artist_names = _missing_keys(storage, scope="artist", keys=_artist_names_from_posts(stored_posts), dependency="ArtistVerificationIndex")
-        if artist_names:
-            storage.enrichment.mark_pending(scope="artist", keys=artist_names, dependency="ArtistVerificationIndex", source_run_id=source_run_id)
-            queue.enqueue(
-                JobKind.ENRICH_ARTISTS.value,
-                {"names": list(artist_names), "source_run_id": source_run_id},
-                source_run_id=source_run_id,
-                priority=20,
-            )
-            count += 1
+        queue.enqueue(
+            JobKind.ENRICH_ARTISTS,
+            {"source_run_id": int(source_run_id)},
+            source_run_id=source_run_id,
+            priority=20,
+        )
+        count += 1
 
     return count
 
@@ -351,19 +340,19 @@ def _enqueue_image_jobs(
     config: SixTwoOneConfig,
     storage: Storage,
     queue: Queue,
-    source_run_id: str,
+    source_run_id: SourceRunId,
     stored_posts: Iterable[Any],
-    variant: str,
+    variant: ImageVariant,
 ) -> dict[str, int]:
     counts = {"new_image_jobs": 0, "already_queued": 0, "already_downloaded": 0, "skipped": 0}
     existing_image_jobs = _existing_image_job_keys(storage)
 
     for post in stored_posts:
         post_id = int(post.id)
-        if storage.images.exists(post_id, variant):
+        if storage.files.exists(post_id, variant):
             counts["already_downloaded"] += 1
             continue
-        if (post_id, variant) in existing_image_jobs:
+        if (post_id, variant.storage_name) in existing_image_jobs:
             counts["already_queued"] += 1
             continue
 
@@ -372,28 +361,18 @@ def _enqueue_image_jobs(
             counts["skipped"] += 1
             continue
 
-        destination = storage.images.path_for(
+        destination = storage.files.path_for(
             config.images_dir,
             post_id=post_id,
             variant=variant,
             file_ext=image["file_ext"],
         )
-        storage.images.enqueue(
-            post_id,
-            image["source_url"],
-            variant=variant,
-            local_path=destination,
-            file_ext=image.get("file_ext"),
-            width=image.get("width"),
-            height=image.get("height"),
-            size_bytes=image.get("size_bytes"),
-            md5=image.get("md5"),
-        )
+        storage.files.mark_pending(post_id, variant, local_path=destination)
         queue.enqueue(
-            JobKind.DOWNLOAD_IMAGE.value,
+            _download_job_kind(variant),
             {
                 "post_id": post_id,
-                "variant": variant,
+                "variant": variant.storage_name,
                 "source_url": image["source_url"],
                 "destination": str(destination),
                 "file_ext": image.get("file_ext"),
@@ -412,7 +391,7 @@ def _enqueue_image_jobs(
 
 
 def image_payload(raw: Mapping[str, Any], variant: str | ImageVariant) -> dict[str, Any] | None:
-    variant = ImageVariant(variant)
+    variant = _image_variant_from_name(variant) if isinstance(variant, str) else variant
     file_data = raw.get("file") or {}
     if variant is ImageVariant.ORIGINAL:
         url = file_data.get("url")
@@ -428,7 +407,7 @@ def image_payload(raw: Mapping[str, Any], variant: str | ImageVariant) -> dict[s
             "md5": file_data.get("md5"),
         }
 
-    data = raw.get(variant.value) or {}
+    data = raw.get(variant.storage_name) or {}
     url = data.get("url")
     if not url:
         return None
@@ -444,13 +423,13 @@ def image_payload(raw: Mapping[str, Any], variant: str | ImageVariant) -> dict[s
 
 
 def _existing_image_job_keys(storage: Storage) -> set[tuple[int, str]]:
-    states = (JobState.PENDING, JobState.RETRYING, JobState.RUNNING)
+    states = (JobState.READY, JobState.LEASED)
     keys: set[tuple[int, str]] = set()
     for job in storage.queue.list(states=states):
-        if job.kind != JobKind.DOWNLOAD_IMAGE.value:
+        if job.kind not in _DOWNLOAD_JOB_KINDS:
             continue
         try:
-            keys.add((int(job.payload["post_id"]), ImageVariant(job.payload.get("variant", "original")).value))
+            keys.add((int(job.payload["post_id"]), _image_variant_from_name(job.payload.get("variant", "original")).storage_name))
         except (KeyError, TypeError, ValueError):
             continue
     return keys
@@ -462,38 +441,43 @@ def _ext_from_url(url: str) -> str | None:
         return None
     return filename.rsplit(".", 1)[-1]
 
-def _missing_keys(storage: Storage, *, scope: str, keys: Iterable[Any], dependency: str) -> tuple[Any, ...]:
-    missing: list[Any] = []
-    for key in keys:
-        coverage = storage.enrichment.get(scope, key, dependency)
-        if coverage is None or coverage.state not in {EnrichmentState.READY, EnrichmentState.UNSUPPORTED_AUTH}:
-            missing.append(key)
-    return tuple(missing)
-
-
-def locally_matching_post_ids(storage: Storage, query: str) -> set[int]:
+def locally_matching_post_ids(storage: Storage, query: str, *, candidate_post_ids=None) -> set[int]:
     """Evaluate a semantic query against cached post JSON."""
 
     compiled = compile_query(storage, query)
-    matches = filter_posts(compiled, storage.posts.all())
+    if candidate_post_ids is None:
+        raise ValueError("locally_matching_post_ids requires an explicit candidate_post_ids iterable")
+    matches = storage.posts.matching(compiled, ids=candidate_post_ids)
     return {post.id for post in matches}
 
 
-def _user_ids_from_posts(stored_posts: Iterable[Any]) -> tuple[int, ...]:
-    ids: set[int] = set()
-    for post in stored_posts:
-        raw = post.raw
-        for key in ("uploader_id", "approver_id"):
-            value = raw.get(key)
-            if value is not None:
-                ids.add(int(value))
-    return tuple(sorted(ids))
+_DOWNLOAD_JOB_KINDS = frozenset((JobKind.DOWNLOAD_ORIGINAL, JobKind.DOWNLOAD_SAMPLE, JobKind.DOWNLOAD_PREVIEW))
 
 
-def _artist_names_from_posts(stored_posts: Iterable[Any]) -> tuple[str, ...]:
-    names: set[str] = set()
-    for post in stored_posts:
-        tags = post.raw.get("tags") or {}
-        for name in tags.get("artist") or []:
-            names.add(str(name))
-    return tuple(sorted(names))
+def _download_job_kind(variant: ImageVariant) -> JobKind:
+    return {
+        ImageVariant.ORIGINAL: JobKind.DOWNLOAD_ORIGINAL,
+        ImageVariant.SAMPLE: JobKind.DOWNLOAD_SAMPLE,
+        ImageVariant.PREVIEW: JobKind.DOWNLOAD_PREVIEW,
+    }[variant]
+
+
+def _image_variant_from_name(value: object) -> ImageVariant:
+    if isinstance(value, ImageVariant):
+        return value
+    if isinstance(value, str):
+        variants = {
+            ImageVariant.ORIGINAL.storage_name: ImageVariant.ORIGINAL,
+            ImageVariant.SAMPLE.storage_name: ImageVariant.SAMPLE,
+            ImageVariant.PREVIEW.storage_name: ImageVariant.PREVIEW,
+        }
+        normalized = value.strip().lower()
+        if normalized in variants:
+            return variants[normalized]
+    raise ValueError(f"Unsupported image variant: {value!r}")
+
+
+def _post_id(post: Any) -> int:
+    if isinstance(post, Mapping):
+        return int(post["id"])
+    return int(getattr(post, "id"))

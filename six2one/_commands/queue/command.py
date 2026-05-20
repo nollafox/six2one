@@ -13,12 +13,12 @@ from typing import Any, Literal
 from six2one.e621 import E621Client
 from six2one.queue.models import JobKind, JobState
 from six2one.storage import open_storage
-from six2one.storage.models import ImageState
+from six2one.storage.models import SourceRunId
 
 from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.errors import CommandError
 
-from .planning import _bound_query_metadata, _canonical_query, compile_query, locally_matching_post_ids, queue_query_work
+from .planning import _DOWNLOAD_JOB_KINDS, _bound_query_metadata, _canonical_query, compile_query, locally_matching_post_ids, queue_query_work
 
 SourceRunState = Literal["pending", "downloading", "paused", "success"]
 
@@ -231,51 +231,61 @@ def run_queue_amend(
         raise CommandError("queue amend requires --exclude QUERY")
 
     with open_storage(config.storage_path) as storage:
-        run = storage.source_runs.get(source_run_id)
-        if run is None:
+        try:
+            run_id = SourceRunId(int(source_run_id))
+            run = storage.source_runs.get(run_id)
+        except (KeyError, ValueError):
             raise CommandError(f"Unknown source run: {source_run_id}")
 
-        excluded_post_ids = _locally_matching_post_ids(storage, exclude)
-        removable_jobs = [
+        candidate_jobs = [
             job
             for job in storage.queue.list(
-                states=(JobState.PENDING, JobState.RETRYING, JobState.RUNNING, JobState.FAILED),
-                source_run_id=source_run_id,
+                states=(JobState.READY, JobState.LEASED, JobState.FAILED),
+                source_run_id=run_id,
             )
-            if job.kind == JobKind.DOWNLOAD_IMAGE.value
-            and int(job.payload.get("post_id", -1)) in excluded_post_ids
+            if job.kind in _DOWNLOAD_JOB_KINDS
         ]
-        pending_removed = sum(1 for job in removable_jobs if job.state in {JobState.PENDING, JobState.RETRYING, JobState.RUNNING})
+        excluded_post_ids = _locally_matching_post_ids(
+            storage,
+            exclude,
+            candidate_post_ids=(int(job.payload.get("post_id", -1)) for job in candidate_jobs),
+        )
+        removable_jobs = [
+            job
+            for job in candidate_jobs
+            if int(job.payload.get("post_id", -1)) in excluded_post_ids
+        ]
+        pending_removed = sum(1 for job in removable_jobs if job.state in {JobState.READY, JobState.LEASED})
         failed_removed = sum(1 for job in removable_jobs if job.state is JobState.FAILED)
         for job in removable_jobs:
             storage.queue.cancel(job.id, message=f"removed by queue amend --exclude {exclude}")
 
         amended_query = _amended_query(run.query, exclude)
-        exclusions = [*run.metadata.get("exclusions", ()), exclude]
         compiled = compile_query(storage, amended_query)
-        storage.source_runs.update_query(
-            source_run_id,
-            amended_query,
-            metadata={
-                "original_query": run.metadata.get("original_query", run.query),
-                "exclusions": exclusions,
+        storage.source_runs.update_query(run_id, amended_query)
+        metadata = dict(run.metadata)
+        metadata.update(
+            {
+                "original_query": metadata.get("original_query", run.query),
+                "exclusions": [*metadata.get("exclusions", ()), exclude],
                 "raw_query": amended_query,
                 "normalized_query": _canonical_query(compiled),
                 "canonical_query": _canonical_query(compiled),
                 "bound_query_json": _bound_query_metadata(compiled),
-            },
+            }
         )
+        storage.source_runs.update_metadata(run_id, metadata)
         remaining = [
             job
             for job in storage.queue.list(
-                states=(JobState.PENDING, JobState.RETRYING, JobState.RUNNING, JobState.FAILED),
-                source_run_id=source_run_id,
+                states=(JobState.READY, JobState.LEASED, JobState.FAILED),
+                source_run_id=run_id,
             )
-            if job.kind == JobKind.DOWNLOAD_IMAGE.value
+            if job.kind in _DOWNLOAD_JOB_KINDS
         ]
 
         return QueueAmendResult(
-            source_run_id=source_run_id,
+            source_run_id=str(int(run_id)),
             exclude=exclude,
             original_query=run.query,
             amended_query=amended_query,
@@ -324,9 +334,9 @@ def run_queue_clear(
     with open_storage(config.storage_path) as storage:
         jobs = _clearable_image_jobs(storage, target=target, failed_only=failed)
         source_ids = {job.source_run_id for job in jobs if job.source_run_id}
-        pending = sum(1 for job in jobs if job.state in {JobState.PENDING, JobState.RETRYING, JobState.RUNNING})
+        pending = sum(1 for job in jobs if job.state in {JobState.READY, JobState.LEASED})
         failed_count = sum(1 for job in jobs if job.state is JobState.FAILED)
-        source_run = _source_run_summary(storage, target) if target and target.startswith("q_") else None
+        source_run = _source_run_summary(storage, target) if target and target.isdigit() else None
         preview = QueueClearPreview(
             target=target,
             failed_only=failed,
@@ -361,12 +371,12 @@ def _create_e621_client(config: SixTwoOneConfig) -> E621Client:
 
 def _queue_list_from_storage(storage, *, failed: bool, compact: bool) -> QueueListResult:
     jobs = storage.queue.list()
-    image_jobs = [job for job in jobs if job.kind == JobKind.DOWNLOAD_IMAGE.value]
+    image_jobs = [job for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS]
     source_runs = storage.source_runs.list()
     active_source_ids = {
         job.source_run_id
         for job in jobs
-        if job.source_run_id and job.state in {JobState.PENDING, JobState.RETRYING, JobState.RUNNING, JobState.FAILED}
+        if job.source_run_id and job.state in {JobState.READY, JobState.LEASED, JobState.FAILED}
     }
     runs = tuple(
         _source_run_summary(storage, run.id)
@@ -377,27 +387,29 @@ def _queue_list_from_storage(storage, *, failed: bool, compact: bool) -> QueueLi
     failed_runs = tuple(group for group in failed_runs if group.jobs)
     status = QueueStatus(
         active_source_runs=len(active_source_ids),
-        pending_image_jobs=sum(1 for job in image_jobs if job.state in {JobState.PENDING, JobState.RETRYING, JobState.RUNNING}),
+        pending_image_jobs=sum(1 for job in image_jobs if job.state in {JobState.READY, JobState.LEASED}),
         failed_image_jobs=sum(1 for job in image_jobs if job.state is JobState.FAILED),
         downloaded_images=_downloaded_image_count(storage),
         cached_post_json=len(storage.posts.list_ids()),
-        last_updated=max((run.updated_at for run in source_runs), default=None),
+        last_updated=str(max((run.updated_ms for run in source_runs), default="")) or None,
     )
     return QueueListResult(status=status, runs=runs, failed_runs=failed_runs, failed_only=failed, compact=compact)
 
 
-def _source_run_summary(storage, source_run_id: str | None) -> SourceRunQueueSummary | None:
+def _source_run_summary(storage, source_run_id: str | int | SourceRunId | None) -> SourceRunQueueSummary | None:
     if source_run_id is None:
         return None
-    run = storage.source_runs.get(source_run_id)
-    if run is None:
+    try:
+        run_id = SourceRunId(int(source_run_id))
+        run = storage.source_runs.get(run_id)
+    except (KeyError, ValueError):
         return None
-    jobs = storage.queue.list(source_run_id=source_run_id)
-    image_jobs = [job for job in jobs if job.kind == JobKind.DOWNLOAD_IMAGE.value]
-    pending_image = sum(1 for job in image_jobs if job.state in {JobState.PENDING, JobState.RETRYING, JobState.RUNNING})
+    jobs = storage.queue.list(source_run_id=run_id)
+    image_jobs = [job for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS]
+    pending_image = sum(1 for job in image_jobs if job.state in {JobState.READY, JobState.LEASED})
     failed_image = sum(1 for job in image_jobs if job.state is JobState.FAILED)
-    downloaded = sum(1 for job in image_jobs if job.state is JobState.COMPLETED)
-    pending_jobs = sum(1 for job in jobs if job.state in {JobState.PENDING, JobState.RETRYING, JobState.RUNNING})
+    downloaded = sum(1 for job in image_jobs if job.state is JobState.DONE)
+    pending_jobs = sum(1 for job in jobs if job.state in {JobState.READY, JobState.LEASED})
     failed_jobs = sum(1 for job in jobs if job.state is JobState.FAILED)
     state: SourceRunState = "success"
     if failed_jobs:
@@ -405,18 +417,18 @@ def _source_run_summary(storage, source_run_id: str | None) -> SourceRunQueueSum
     elif pending_jobs:
         state = "pending"
     return SourceRunQueueSummary(
-        id=run.id,
+        id=str(int(run.id)),
         query=run.query,
         state=state,
-        discovered_pages=(run.metadata or {}).get("discovered_pages"),
+        discovered_pages=None,
         cached_posts=run.total_candidates or 0,
         pending_image_jobs=pending_image,
         failed_image_jobs=failed_image,
         downloaded_images=downloaded,
         pending_jobs=pending_jobs,
         failed_jobs=failed_jobs,
-        added=run.created_at,
-        backend=run.backend or "web → sqlite",
+        added=str(run.created_ms),
+        backend="web → sqlite",
         last_error=next((job.last_error for job in jobs if job.last_error), None),
     )
 
@@ -425,7 +437,7 @@ def _failed_group(storage, run: SourceRunQueueSummary) -> FailedSourceRunSummary
     jobs = storage.queue.list(states=(JobState.FAILED,), source_run_id=run.id)
     failed_images: list[FailedImageJob] = []
     for job in jobs:
-        if job.kind != JobKind.DOWNLOAD_IMAGE.value:
+        if job.kind not in _DOWNLOAD_JOB_KINDS:
             continue
         failed_images.append(
             FailedImageJob(
@@ -439,19 +451,23 @@ def _failed_group(storage, run: SourceRunQueueSummary) -> FailedSourceRunSummary
 
 
 def _clearable_image_jobs(storage, *, target: str | None, failed_only: bool):
-    states = (JobState.FAILED,) if failed_only else (JobState.PENDING, JobState.RETRYING, JobState.RUNNING, JobState.FAILED)
-    source_run_id = target if target and target.startswith("q_") else None
-    jobs = [job for job in storage.queue.list(states=states, source_run_id=source_run_id) if job.kind == JobKind.DOWNLOAD_IMAGE.value]
-    if target and not target.startswith("q_"):
-        post_ids = _locally_matching_post_ids(storage, target)
+    states = (JobState.FAILED,) if failed_only else (JobState.READY, JobState.LEASED, JobState.FAILED)
+    source_run_id = SourceRunId(int(target)) if target and target.isdigit() else None
+    jobs = [job for job in storage.queue.list(states=states, source_run_id=source_run_id) if job.kind in _DOWNLOAD_JOB_KINDS]
+    if target and not target.isdigit():
+        post_ids = _locally_matching_post_ids(
+            storage,
+            target,
+            candidate_post_ids=(int(job.payload.get("post_id", -1)) for job in jobs),
+        )
         jobs = [job for job in jobs if int(job.payload.get("post_id", -1)) in post_ids]
     return jobs
 
 
-def _locally_matching_post_ids(storage, query: str) -> set[int]:
+def _locally_matching_post_ids(storage, query: str, *, candidate_post_ids=None) -> set[int]:
     """Return cached posts matching a semantic e621 query."""
 
-    return locally_matching_post_ids(storage, query)
+    return locally_matching_post_ids(storage, query, candidate_post_ids=candidate_post_ids)
 
 
 def _amended_query(query: str, exclude: str) -> str:
@@ -459,4 +475,4 @@ def _amended_query(query: str, exclude: str) -> str:
 
 
 def _downloaded_image_count(storage) -> int:
-    return sum(1 for image in storage.images.list() if image.state is ImageState.DOWNLOADED)
+    return storage.files.downloaded_count()

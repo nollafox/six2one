@@ -7,7 +7,7 @@ from ..models import JobKind
 
 
 class FetchPageJob(Job):
-    kind = JobKind.FETCH_PAGE.value
+    kind = JobKind.FETCH_PAGE
     title = "Fetch page"
 
     def validate_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -25,5 +25,5 @@ class FetchPageJob(Job):
         if context.e621 is None:
             raise RuntimeError("FetchPageJob requires context.e621")
         posts = context.e621.posts.search(query, limit=limit, page=page).all()
-        stored = context.store.posts.upsert_many(posts)
-        return JobResult(message=f"Cached {len(stored)} posts", metadata={"posts": len(stored), "page": page})
+        report = context.store.imports.import_posts(posts, source_run_id=source_run_id)
+        return JobResult(message=f"Cached {report.accepted} posts", metadata={"posts": report.accepted, "page": page})

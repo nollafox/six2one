@@ -13,9 +13,11 @@ from typing import Any
 from six2one.e621 import E621Client
 from six2one.queue.models import JobState
 from six2one.storage import open_storage
+from six2one.storage.models import SourceRunId
 
 from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.queue.command import QueueCommandResult, run_queue
+from six2one._commands.queue.planning import _DOWNLOAD_JOB_KINDS
 from six2one._commands.queue.runtime import human_bytes, run_jobs
 
 
@@ -130,10 +132,11 @@ def run_fetch(
         before_failed = _failed_image_jobs(storage, source_run_id=queued.source_run_id)
         before_pending_images = _pending_image_jobs(storage, source_run_id=queued.source_run_id)
         summary = run_jobs(storage=storage, e621=client, source_run_id=queued.source_run_id, settings=config)
+        run_id = SourceRunId(int(queued.source_run_id))
         if summary.paused_after_error:
-            storage.source_runs.update_state(queued.source_run_id, "paused")
+            storage.source_runs.update_state(run_id, "paused")
         else:
-            storage.source_runs.update_state(queued.source_run_id, "success")
+            storage.source_runs.update_state(run_id, "success")
 
     download = FetchDownloadSummary(
         downloaded=summary.downloaded_images,
@@ -191,15 +194,21 @@ def _create_e621_client(config: SixTwoOneConfig) -> E621Client:
 
 
 def _pending_image_jobs(storage, *, source_run_id: str | None) -> int:
-    jobs = storage.queue.list(states=(JobState.PENDING, JobState.RETRYING, JobState.RUNNING), source_run_id=source_run_id)
-    return sum(1 for job in jobs if job.kind == "download_image")
+    jobs = storage.queue.list(
+        states=(JobState.READY, JobState.LEASED),
+        source_run_id=SourceRunId(int(source_run_id)) if source_run_id is not None else None,
+    )
+    return sum(1 for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS)
 
 
 def _failed_image_jobs(storage, *, source_run_id: str | None) -> int:
-    jobs = storage.queue.list(states=(JobState.FAILED,), source_run_id=source_run_id)
-    return sum(1 for job in jobs if job.kind == "download_image")
+    jobs = storage.queue.list(
+        states=(JobState.FAILED,),
+        source_run_id=SourceRunId(int(source_run_id)) if source_run_id is not None else None,
+    )
+    return sum(1 for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS)
 
 
 def _active_source_runs(storage) -> int:
-    jobs = storage.queue.list(states=(JobState.PENDING, JobState.RETRYING, JobState.RUNNING, JobState.FAILED))
+    jobs = storage.queue.list(states=(JobState.READY, JobState.LEASED, JobState.FAILED))
     return len({job.source_run_id for job in jobs if job.source_run_id})

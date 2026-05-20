@@ -6,11 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from six2one.e621 import E621Client
-from six2one.query import filter_posts
 from six2one.queue import Queue, default_registry
 from six2one.queue.jobs.evaluate_query import StorageQueryData
 from six2one.storage import open_storage
-from six2one.storage.models import ImageState
+from six2one.storage.models import PostLoad
 
 from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.queue.planning import _dependency_kind, _enqueue_enrichment_jobs, compile_query
@@ -43,9 +42,7 @@ def run_export(
     client = e621 or E621Client(auth=config.auth, user_agent=config.user_agent)
 
     with open_storage(config.storage_path) as storage:
-        downloaded = tuple(image for image in storage.images.list() if image.state is ImageState.DOWNLOADED and image.local_path)
-        candidate_ids = tuple(sorted({image.post_id for image in downloaded}))
-        candidates = storage.posts.get_many(candidate_ids)
+        candidate_ids = storage.files.downloaded_post_ids()
 
         enrichment_jobs = 0
         completed_jobs = 0
@@ -54,19 +51,14 @@ def run_export(
         if query:
             compiled = compile_query(storage, query)
             dependencies = tuple(_dependency_kind(dep) for dep in compiled.bound.data_dependencies)
-            source_run = storage.source_runs.create(
-                query,
-                state="pending",
-                backend="sqlite → export",
-                metadata={"dependencies": dependencies, "export": str(out)},
-            )
+            source_run = storage.source_runs.start(query=query, state_id=0, backend_id=2)
             enrichment_jobs = _enqueue_enrichment_jobs(
                 storage=storage,
                 queue=Queue(storage, default_registry()),
                 source_run_id=source_run.id,
                 dependencies=dependencies,
-                post_ids=tuple(post.id for post in candidates),
-                stored_posts=candidates,
+                post_ids=candidate_ids,
+                stored_posts=(),
             )
             if enrichment_jobs:
                 summary = run_jobs(storage=storage, e621=client, source_run_id=source_run.id, settings=config)
@@ -74,9 +66,9 @@ def run_export(
                 failed_jobs = summary.failed_jobs
             storage.source_runs.update_state(source_run.id, "success" if failed_jobs == 0 else "paused")
 
-        matches = tuple(candidates if compiled is None else filter_posts(compiled, candidates, data=StorageQueryData(storage)))
+        matches = storage.posts.get_many(candidate_ids, load=PostLoad.full()) if compiled is None else storage.posts.matching(compiled, ids=candidate_ids, data=StorageQueryData(storage))
         match_ids = {post.id for post in matches}
-        images = tuple(image for image in downloaded if image.post_id in match_ids)
+        images = storage.files.downloaded_for_posts(match_ids)
 
         out_images = out / "images"
         out_posts = out / "posts"
@@ -125,5 +117,5 @@ def _post_dir(post_id: int) -> str:
 
 
 def _image_name(image: Any) -> str:
-    ext = (image.file_ext or Path(str(image.local_path)).suffix.lstrip(".") or "bin").lstrip(".")
-    return f"{image.variant.value}.{ext}"
+    ext = (Path(str(image.local_path)).suffix.lstrip(".") or "bin").lstrip(".")
+    return f"{image.variant.storage_name}.{ext}"

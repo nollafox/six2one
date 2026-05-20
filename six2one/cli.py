@@ -14,6 +14,7 @@ from ._commands.export import format_export_result, run_export
 from ._commands.config import SixTwoOneConfig
 from ._commands.errors import CommandError
 from ._commands.fetch import format_fetch_queue_result, format_fetch_result, run_fetch, run_fetch_queue
+from ._commands.mirror import format_mirror_result, run_mirror
 from ._commands.queue import (
     format_queue_amend_result,
     format_queue_clear_preview,
@@ -39,6 +40,7 @@ AUTH_COMMAND = "auth"
 BOOTSTRAP_COMMAND = "bootstrap"
 QUERY_COMMAND = "query"
 QUEUE_COMMAND = "queue"
+MIRROR_COMMAND = "mirror"
 DOCUMENTED_COMMANDS = {
     AUTH_COMMAND,
     BOOTSTRAP_COMMAND,
@@ -46,6 +48,7 @@ DOCUMENTED_COMMANDS = {
     FETCH_COMMAND,
     QUERY_COMMAND,
     QUEUE_COMMAND,
+    MIRROR_COMMAND,
 }
 OPTIONS_REQUIRING_VALUE = {
     "-n",
@@ -68,6 +71,7 @@ TOP_LEVEL_EPILOG = """
 Examples:
   {prog} auth
   {prog} bootstrap
+  {prog} mirror
   {prog} queue "dragon rating:s" --limit 10
   {prog} fetch "dragon rating:s" --limit 10
   {prog} export "dragon rating:s" -o ./dragon-export
@@ -112,6 +116,12 @@ Examples:
   {prog} auth --test
   {prog} auth --remove
 """
+MIRROR_DESCRIPTION = """Mirror e621 DB exports into the local sqlite cache."""
+MIRROR_EPILOG = """
+Examples:
+  {prog} mirror
+  {prog} mirror --date 2026-05-18
+"""
 
 def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.ArgumentParser:
     """Build the six2one CLI parser."""
@@ -135,6 +145,7 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
     bootstrap_parser.add_argument("--no-progress", action="store_true", help="disable live progress output")
     bootstrap_parser.add_argument("--verbose", action="store_true", help="print extra diagnostic output")
     bootstrap_parser.add_argument("--json", action="store_true", help="write the final result as JSON")
+    bootstrap_parser.add_argument("--migrate", action="store_true", help="apply pending sqlite migrations without re-importing exports")
 
     auth_parser = subparsers.add_parser(
         AUTH_COMMAND,
@@ -149,6 +160,16 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
     auth_parser.add_argument("--test", action="store_true", help="test stored credentials")
     auth_parser.add_argument("--remove", action="store_true", help="remove stored credentials")
     auth_parser.add_argument("--yes", action="store_true", help="do not prompt before removing credentials")
+
+    mirror_parser = subparsers.add_parser(
+        MIRROR_COMMAND,
+        help="mirror e621 DB exports into sqlite",
+        description=textwrap.dedent(MIRROR_DESCRIPTION).strip(),
+        epilog=textwrap.dedent(MIRROR_EPILOG).strip().format(prog=prog),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+    )
+    mirror_parser.add_argument("--date", help="export date to mirror; default: latest shared export date")
 
     query_parser = subparsers.add_parser(
         QUERY_COMMAND,
@@ -310,6 +331,8 @@ async def main(argv: Sequence[str] | None = None, default_site: Site | None = No
             return _run_fetch_command(namespace)
         if namespace.command == EXPORT_COMMAND:
             return _run_export_command(namespace)
+        if namespace.command == MIRROR_COMMAND:
+            return _run_mirror_command(namespace)
         if namespace.command == AUTH_COMMAND:
             return AuthCommand.from_args(namespace).run()
         raise CommandError(f"Unsupported command: {namespace.command}")
@@ -362,6 +385,15 @@ def _run_export_command(namespace: argparse.Namespace) -> int:
         output_dir=namespace.output_dir,
     )
     sys.stdout.write(format_export_result(result) + "\n")
+    return 0
+
+
+def _run_mirror_command(namespace: argparse.Namespace) -> int:
+    result = run_mirror(
+        SixTwoOneConfig.from_args(namespace),
+        date=namespace.date,
+    )
+    sys.stdout.write(format_mirror_result(result) + "\n")
     return 0
 
 

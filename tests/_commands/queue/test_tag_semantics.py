@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.queue import run_queue, run_queue_clear
-from six2one.queue.models import JobState
-from six2one.storage import create_storage, open_storage
+from six2one.queue.models import JobKind, JobState
+from six2one.storage import open_storage
 from tests.factories import FakeE621, post_payload
+from tests.support import initialized_config
 
 
 def test_queue_source_run_keeps_raw_query_and_bound_canonical_metadata(tmp_path: Path):
-    config = SixTwoOneConfig(home=tmp_path / "home")
-    _initialize_tagged_storage(config)
+    config = _initialize_tagged_storage(tmp_path)
     e621 = FakeE621(posts=[post_payload(1, tag="domestic_cat")])
 
     result = run_queue(config, "cat rating:s", limit=1, e621=e621)
@@ -30,14 +29,13 @@ def test_queue_source_run_keeps_raw_query_and_bound_canonical_metadata(tmp_path:
 
 
 def test_queue_clear_uses_alias_and_implication_semantics_not_query_strings(tmp_path: Path):
-    config = SixTwoOneConfig(home=tmp_path / "home")
-    _initialize_tagged_storage(config)
+    config = _initialize_tagged_storage(tmp_path)
     e621 = FakeE621(posts=[post_payload(1, tag="tabby_cat"), post_payload(2, tag="wolf")])
 
     queued = run_queue(config, "domestic_cat rating:s", limit=2, e621=e621)
     with open_storage(config.storage_path) as storage:
         storage.queue.enqueue(
-            "download_image",
+            JobKind.DOWNLOAD_ORIGINAL,
             {"post_id": 2, "variant": "original", "destination": "wolf.png"},
             source_run_id=queued.source_run_id,
         )
@@ -48,12 +46,13 @@ def test_queue_clear_uses_alias_and_implication_semantics_not_query_strings(tmp_
 
     assert result.pending_removed == 1
     assert jobs[1].state is JobState.CANCELLED
-    assert jobs[2].state is JobState.PENDING
+    assert jobs[2].state is JobState.READY
 
 
-def _initialize_tagged_storage(config: SixTwoOneConfig) -> None:
-    with create_storage(config.storage_path) as storage:
-        storage.tags.replace_from_exports(
+def _initialize_tagged_storage(tmp_path: Path):
+    config = initialized_config(tmp_path)
+    with open_storage(config.storage_path) as storage:
+        storage.tags.import_exports(
             tags=[
                 {"id": "1", "name": "domestic_cat", "category": "5", "post_count": "100"},
                 {"id": "2", "name": "tabby_cat", "category": "5", "post_count": "50"},
@@ -67,3 +66,4 @@ def _initialize_tagged_storage(config: SixTwoOneConfig) -> None:
             ],
             export_date="2026-05-18",
         )
+    return config

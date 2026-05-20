@@ -14,7 +14,7 @@ class QueueClearFilter:
 
     @property
     def is_source_run_id(self) -> bool:
-        return bool(self.target and self.target.startswith("q_"))
+        return bool(self.target and self.target.isdigit())
 
     @property
     def is_semantic_query(self) -> bool:

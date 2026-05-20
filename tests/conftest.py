@@ -10,11 +10,8 @@ from tests.factories import FakeE621
 
 @pytest.fixture
 def store(tmp_path: Path):
-    storage = create_storage(tmp_path / "six2one.sqlite")
-    try:
-        yield storage
-    finally:
-        storage.close()
+    with create_storage(tmp_path / "six2one.sqlite") as store:
+        yield store
 
 
 @pytest.fixture

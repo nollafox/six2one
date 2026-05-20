@@ -1,108 +1,140 @@
+from __future__ import annotations
+
+from datetime import timedelta
+
+from six2one.query import E621QueryLanguage
 from six2one.storage import create_storage, validate_storage
-from six2one.storage.models import JobState, EnrichmentState, ImageVariant
+from six2one.storage.models import Claimed, ImageVariant, JobKind, JobState, PostLoad, Rating, SourceRunId
 from tests.factories import post_payload
 
 
 def test_create_storage_runs_migrations(tmp_path):
     path = tmp_path / "db.sqlite"
 
-    store = create_storage(path)
-    try:
+    with create_storage(path) as store:
         status = validate_storage(path)
-        tables = store.metadata.table_names()
+        tables = store.maintenance.table_names()
 
         assert status.ready
-        assert store.metadata.get("schema", "storage") == "1"
+        assert store.metadata.get("schema", "storage") == "2"
         assert "posts" in tables
         assert "queue_jobs" in tables
         assert "enrichment_coverage" in tables
-    finally:
-        store.close()
 
 
 def test_source_runs_and_posts_are_persisted(store):
-    run = store.source_runs.create("dragon rating:s", backend="sqlite")
-    post = store.posts.upsert(post_payload(101, tag="fox"))
+    run = store.source_runs.start(query="dragon rating:s", backend_id=1)
+    report = store.imports.import_posts([post_payload(101, tag="fox")], source_run_id=run.id)
 
-    assert run.id.startswith("q_")
+    post = store.posts.get(101, load=PostLoad.full())
+
+    assert isinstance(run.id, int)
+    assert report.accepted == 1
     assert post.id == 101
-    assert post.file_url.endswith("101.png")
-    assert store.posts.list_ids() == (101,)
+    assert post.rating is Rating.SAFE
+    assert store.posts.query().tag("fox").limit(10).ids() == (101,)
 
 
 def test_cached_post_tags_are_stored_once_by_normalized_e621_name(store):
     payload = post_payload(102, tag="Domestic Cat")
 
-    store.posts.upsert(payload)
+    store.imports.import_posts([payload])
 
-    rows = store.database.fetch_all("SELECT tag FROM post_tags WHERE post_id = ? ORDER BY tag", (102,))
-    tags = [row["tag"] for row in rows]
+    tags = store.tags.names_for_post(102)
     assert "domestic_cat" in tags
     assert "Domestic Cat" not in tags
 
 
-def test_enrichment_store_tracks_missing_and_ready_dependencies(store):
-    run = store.source_runs.create("dragon rating:s", backend="sqlite")
-    store.posts.upsert(post_payload(101, tag="fox"))
-
-    missing = store.enrichment.missing(post_ids=[101], dependencies=["CommentsIndex"])
-
-    assert len(missing) == 1
-    assert missing[0].keys == ("101",)
-
-    store.enrichment.mark_ready(scope="post", keys=[101], dependency="CommentsIndex", source_run_id=run.id)
-
-    coverage = store.enrichment.get("post", 101, "CommentsIndex")
-    assert coverage.state is EnrichmentState.READY
-    assert not store.enrichment.missing(post_ids=[101], dependencies=["CommentsIndex"])
-
-
-def test_image_store_tracks_pending_and_downloaded_variants(store, tmp_path):
-    store.posts.upsert(post_payload(101, tag="fox"))
-
-    image_path = store.images.path_for(tmp_path / "images", post_id=101, variant="original", file_ext="png")
-    image = store.images.enqueue(
-        101,
-        "https://static.example/101.png",
-        variant="original",
-        local_path=image_path,
-        file_ext="png",
-        width=100,
-        height=100,
-        size_bytes=201,
-        md5="md5-101",
+def test_post_import_preserves_indexes_and_is_idempotent(store):
+    store.tags.import_exports(
+        tags=[
+            {"id": 1, "name": "domestic_cat", "category": 5},
+            {"id": 2, "name": "wolf", "category": 5},
+        ],
+        export_date="2026-05-19",
     )
+    posts = [post_payload(201, tag="Domestic Cat"), post_payload(202, tag="wolf")]
+
+    first = store.imports.import_posts(posts)
+    second = store.imports.import_posts(posts)
+
+    assert first.accepted == 2
+    assert second.accepted == 2
+    assert store.posts.query().tag("domestic_cat").limit(10).ids() == (201,)
+    assert store.posts.query().tag("wolf").limit(10).ids() == (202,)
+
+
+def test_matching_uses_semantic_tags_with_explicit_candidates(store):
+    store.tags.import_exports(
+        tags=[
+            {"id": 1, "name": "canine", "category": 5},
+            {"id": 2, "name": "wolf", "category": 5},
+            {"id": 3, "name": "domestic_dog", "category": 5},
+            {"id": 4, "name": "dog", "category": 5},
+        ],
+        aliases=[{"antecedent_name": "dog", "consequent_name": "domestic_dog", "status": "active"}],
+        implications=[
+            {"antecedent_name": "wolf", "consequent_name": "canine", "status": "active"},
+            {"antecedent_name": "domestic_dog", "consequent_name": "canine", "status": "active"},
+        ],
+        export_date="2026-05-19",
+    )
+    store.imports.import_posts([
+        post_payload(301, tag="wolf"),
+        post_payload(302, tag="domestic_dog"),
+        post_payload(303, tag="dragon"),
+    ])
+    language = E621QueryLanguage(tag_database=store.tags)
+    candidates = store.posts.query().limit(10).allow_table_scan(reason="bounded test candidate set").ids()
+
+    canine = store.posts.matching(language.compile("canine rating:s"), ids=candidates)
+    dog = store.posts.matching(language.compile("dog rating:s"), ids=candidates)
+
+    assert {post.id for post in canine} == {301, 302}
+    assert {post.id for post in dog} == {302}
+
+
+def test_enrichment_coverage_tracks_missing_and_ready_dependencies(store):
+    run = store.source_runs.start(query="dragon rating:s", backend_id=1)
+    store.imports.import_posts([post_payload(101, tag="fox")], source_run_id=run.id)
+
+    missing = store.coverage.missing_post_ids(post_ids=[101], dependency="CommentsIndex")
+    store.coverage.mark_posts_ready(post_ids=[101], dependency="CommentsIndex", source_run_id=run.id)
+
+    assert missing == (101,)
+    assert store.coverage.missing_post_ids(post_ids=[101], dependency="CommentsIndex") == ()
+
+
+def test_file_repository_tracks_pending_and_downloaded_variants(store, tmp_path):
+    store.imports.import_posts([post_payload(101, tag="fox")])
+
+    image_path = store.files.path_for(tmp_path / "images", post_id=101, variant=ImageVariant.ORIGINAL, file_ext="png")
+    store.files.mark_pending(101, ImageVariant.ORIGINAL, local_path=image_path)
 
     assert str(image_path).endswith("images/000000000101/original.png")
-    assert image.variant is ImageVariant.ORIGINAL
-    assert image.local_path == str(image_path)
-    assert image.state.value == "pending"
+    assert store.files.get(101, ImageVariant.ORIGINAL).variant is ImageVariant.ORIGINAL
 
-    store.images.mark_downloaded(101, variant="original", local_path=image_path, bytes_written=5)
 
-    preview = store.images.enqueue(
-        101,
-        "https://static.example/preview/101.jpg",
-        variant="preview",
-        local_path=store.images.path_for(tmp_path / "images", post_id=101, variant="preview", file_ext="jpg"),
-        file_ext="jpg",
+def test_queue_repository_lifecycle(store):
+    job_id = store.queue.enqueue(JobKind.DOWNLOAD_ORIGINAL, {"post_id": 1, "variant": "original"}, priority=5)
+
+    claimed = store.queue.claim_next(
+        JobKind.DOWNLOAD_ORIGINAL,
+        worker_id="w1",
+        lease_for=timedelta(minutes=5),
     )
+    assert isinstance(claimed, Claimed)
+    store.queue.complete(claimed.value.id, metadata={"ok": True}, message="done")
+    done = store.queue.get(job_id)
 
-    assert store.images.get(101, "original").state.value == "downloaded"
-    assert preview.variant is ImageVariant.PREVIEW
-    assert len(store.images.for_post(101)) == 2
+    assert claimed.value.state is JobState.LEASED
+    assert done.state is JobState.DONE
 
 
-def test_queue_store_lifecycle(store):
-    job = store.queue.enqueue("example", {"x": 1}, priority=5)
+def test_source_run_update_state_is_typed(store):
+    run = store.source_runs.start(query="dragon")
 
-    claimed = store.queue.claim_next(worker_id="w1")
-    store.queue.complete(claimed.id, metadata={"ok": True}, message="done")
-    done = store.queue.get(job.id)
+    updated = store.source_runs.update_state(SourceRunId(int(run.id)), "success", total_candidates=1, total_matches=1)
 
-    assert job.state is JobState.PENDING
-    assert claimed.id == job.id
-    assert claimed.state is JobState.RUNNING
-    assert done.state is JobState.COMPLETED
-    assert done.metadata["ok"] is True
-    assert [event.event for event in store.queue.events(job.id)] == ["created", "claimed", "completed"]
+    assert updated.state_id == 2
+    assert updated.total_candidates == 1

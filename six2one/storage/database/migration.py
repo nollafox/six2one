@@ -3,15 +3,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .errors import MigrationError, MigrationNameError
+
 
 MIGRATION_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)
+    applied_ms INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+) STRICT
 """
 
 MIGRATION_FILENAME = re.compile(
@@ -40,17 +42,16 @@ class Migration:
         )
 
 
-def run_migrations(database: object, directory: Path) -> None:
-    """Apply unapplied SQL migrations in version order.
+MigrationCallback = Callable[[Migration], None]
 
-    The database object must expose execute, execute_script, fetch_all, and
-    transaction. The generic migration layer knows nothing about tags.
-    """
 
-    if not directory.exists():
-        raise MigrationError(f"Migration directory does not exist: {directory}")
-    if not directory.is_dir():
-        raise MigrationError(f"Migration path is not a directory: {directory}")
+def run_migrations(
+    database: object,
+    directory: Path,
+    *,
+    on_migration: MigrationCallback | None = None,
+) -> None:
+    """Apply unapplied SQL migrations in version order."""
 
     migrations = _discover_migrations(directory)
 
@@ -66,7 +67,10 @@ def run_migrations(database: object, directory: Path) -> None:
             continue
 
         sql = migration.path.read_text(encoding="utf-8")
-        with database.transaction():
+        if on_migration is not None:
+            on_migration(migration)
+
+        with database.write_transaction():
             database.execute_script(sql)
             database.execute(
                 """
@@ -77,7 +81,25 @@ def run_migrations(database: object, directory: Path) -> None:
             )
 
 
+def pending_migrations(database: object, directory: Path) -> tuple[Migration, ...]:
+    """Return migrations in ``directory`` that are not recorded as applied."""
+
+    migrations = _discover_migrations(directory)
+    database.execute(MIGRATION_TABLE_SQL)
+    database.commit()
+    applied_versions = {
+        str(row["version"])
+        for row in database.fetch_all("SELECT version FROM schema_migrations")
+    }
+    return tuple(migration for migration in migrations if migration.version not in applied_versions)
+
+
 def _discover_migrations(directory: Path) -> tuple[Migration, ...]:
+    if not directory.exists():
+        raise MigrationError(f"Migration directory does not exist: {directory}")
+    if not directory.is_dir():
+        raise MigrationError(f"Migration path is not a directory: {directory}")
+
     migrations = tuple(
         sorted(
             (Migration.from_path(path) for path in directory.glob("*.sql")),

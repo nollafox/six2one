@@ -25,14 +25,14 @@ def test_readme_fetch_broadly_export_narrowly(tmp_path: Path):
 
     run_fetch(config, "dragon rating:s", limit=1000, e621=e621)
     with open_storage(config.storage_path, read_only=True) as storage:
-        download_jobs_before_export = sum(1 for job in storage.queue.list() if job.kind == JobKind.DOWNLOAD_IMAGE.value)
+        download_jobs_before_export = sum(1 for job in storage.queue.list() if job.kind == JobKind.DOWNLOAD_ORIGINAL)
     high_score = run_export(config, query="dragon rating:s score:>100", output_dir=tmp_path / "best-dragons", e621=e621)
     with patch("six2one._commands.export.command.run_jobs", return_value=_run_summary(completed_jobs=2)):
         noted = run_export(config, query="dragon rating:s note:any", output_dir=tmp_path / "noted-dragons", e621=e621)
 
     with open_storage(config.storage_path, read_only=True) as storage:
         jobs = storage.queue.list()
-        download_jobs_after_export = sum(1 for job in jobs if job.kind == JobKind.DOWNLOAD_IMAGE.value)
+        download_jobs_after_export = sum(1 for job in jobs if job.kind == JobKind.DOWNLOAD_ORIGINAL)
 
     assert len(storage_post_ids(config)) == 3
     assert high_score.matched_posts == 2
@@ -65,7 +65,7 @@ def test_cache_is_by_post_not_by_query(tmp_path: Path):
     assert len(e621.transport.downloads) == len(first_downloads)
     assert comments.discovery.enrichment_jobs > 0
     assert scales.discovery.enrichment_jobs > 0
-    assert sum(1 for job in jobs if job.kind == JobKind.ENRICH_COMMENTS.value) == 2
+    assert sum(1 for job in jobs if job.kind == JobKind.ENRICH_COMMENTS) == 2
 
 
 def test_alias_and_implication_reuse_across_commands(tmp_path: Path):
@@ -80,9 +80,9 @@ def test_alias_and_implication_reuse_across_commands(tmp_path: Path):
 
     run_fetch(config, "canine rating:s", limit=100, e621=e621)
     with open_storage(config.storage_path) as storage:
-        pending_run = storage.source_runs.create("domestic_dog rating:s")
+        pending_run = storage.source_runs.start(query="domestic_dog rating:s")
         storage.queue.enqueue(
-            JobKind.DOWNLOAD_IMAGE.value,
+            JobKind.DOWNLOAD_ORIGINAL,
             {"post_id": 3, "variant": "original", "source_url": "https://static.example/3.png", "destination": str(tmp_path / "pending.png")},
             source_run_id=pending_run.id,
         )
@@ -96,7 +96,7 @@ def test_alias_and_implication_reuse_across_commands(tmp_path: Path):
     assert exported.linked_images == 1
     assert cleared.pending_removed == 1
     assert storage_post_ids(config) == (1, 2, 3)
-    assert sum(1 for job in jobs if job.kind == JobKind.DOWNLOAD_IMAGE.value and job.state is JobState.CANCELLED) == 1
+    assert sum(1 for job in jobs if job.kind == JobKind.DOWNLOAD_ORIGINAL and job.state is JobState.CANCELLED) == 1
 
 
 def storage_post_ids(config) -> tuple[int, ...]:

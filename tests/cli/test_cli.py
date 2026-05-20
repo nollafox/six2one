@@ -10,6 +10,7 @@ import pytest
 
 from six2one._commands.export.command import ExportResult
 from six2one._commands.fetch.command import FetchCommandResult, FetchDiscoverySummary, FetchDownloadSummary
+from six2one._commands.mirror.command import MirrorResult
 from six2one._commands.queue.command import QueueAmendResult, QueueCommandResult, QueueRunSummary
 from six2one.cli import main
 
@@ -20,10 +21,11 @@ def test_top_level_help_includes_current_commands():
     assert result.exit_code == 0
     assert "Queue, enrich, and fetch e621 posts" in result.stdout
     assert "auth" in result.stdout
+    assert "mirror" in result.stdout
     assert 'queue "dragon rating:s" --limit 10' in result.stdout
     assert 'export "dragon rating:s" -o ./dragon-export' in result.stdout
     assert "fetch --queue" in result.stdout
-    assert "{bootstrap,auth,query,fetch,export,queue}" in result.stdout
+    assert "{bootstrap,auth,mirror,query,fetch,export,queue}" in result.stdout
     assert not any(line.startswith("    show ") for line in result.stdout.splitlines())
     assert not any(line.startswith("    prune ") for line in result.stdout.splitlines())
     assert result.stderr == ""
@@ -47,6 +49,15 @@ def test_fetch_help_keeps_limit_and_removes_legacy_options():
     assert result.stderr == ""
 
 
+def test_bootstrap_help_includes_migrate_flag():
+    result = _run_cli("bootstrap", "--help", raises=True)
+
+    assert result.exit_code == 0
+    assert "--migrate" in result.stdout
+    assert "pending sqlite migrations" in result.stdout
+    assert result.stderr == ""
+
+
 def test_queue_help_describes_management_commands():
     result = _run_cli("queue", "--help", raises=True)
 
@@ -57,6 +68,16 @@ def test_queue_help_describes_management_commands():
     assert "--exclude" in result.stdout
     assert "--limit" in result.stdout
     assert "omit to process every" in result.stdout
+    assert result.stderr == ""
+
+
+def test_mirror_help_describes_export_mirroring():
+    result = _run_cli("mirror", "--help", raises=True)
+
+    assert result.exit_code == 0
+    assert "Mirror e621 DB exports" in result.stdout
+    assert "--date" in result.stdout
+    assert "--keep-downloads" not in result.stdout
     assert result.stderr == ""
 
 
@@ -140,6 +161,21 @@ def test_export_dispatches_to_new_command(tmp_path: Path):
     run.assert_called_once()
     assert run.call_args.kwargs["query"] == "dragon rating:s"
     assert "six2one export" in result.stdout
+    assert result.stderr == ""
+
+
+def test_mirror_dispatches_to_new_command(tmp_path: Path):
+    command_result = MirrorResult(export_date="2026-05-18", tags_count=1, posts_count=1, pools_count=1, image_jobs_queued=1)
+
+    with patch("six2one.cli.run_mirror", return_value=command_result) as run:
+        result = _run_cli("mirror", "--date", "2026-05-18")
+
+    assert result.exit_code == 0
+    run.assert_called_once()
+    assert run.call_args.kwargs["date"] == "2026-05-18"
+    assert "six2one mirror" in result.stdout
+    assert "Posts" in result.stdout
+    assert "621 fetch --queue" in result.stdout
     assert result.stderr == ""
 
 

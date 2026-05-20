@@ -6,7 +6,7 @@ from ..models import JobKind
 
 
 class EnrichReplacementsJob(Job):
-    kind = JobKind.ENRICH_REPLACEMENTS.value
+    kind = JobKind.ENRICH_REPLACEMENTS
     title = "Enrich replacements"
 
     def run(self, context, *, post_ids: list[int], source_run_id: str | None = None) -> JobResult:

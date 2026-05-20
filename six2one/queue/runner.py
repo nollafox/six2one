@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import traceback
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from .job import JobContext
 from .registry import JobRegistry
+from six2one.storage.models import Claimed, NothingReady
 from six2one.storage.stores import Storage
 
 
@@ -21,9 +22,16 @@ class QueueRunner:
     retry_delay_seconds: int = 30
 
     def run_once(self) -> bool:
-        record = self.store.queue.claim_next(worker_id=self.worker_id, lease_seconds=self.lease_seconds)
-        if record is None:
+        claimed = self.store.queue.claim_next_any(
+            self.registry.kinds(),
+            worker_id=self.worker_id,
+            lease_for=timedelta(seconds=self.lease_seconds),
+        )
+        if isinstance(claimed, NothingReady):
             return False
+        if not isinstance(claimed, Claimed):
+            return False
+        record = claimed.value
 
         job = self.registry.create(record.kind)
         try:
@@ -35,12 +43,14 @@ class QueueRunner:
                     source_run_id=requested.source_run_id or record.source_run_id,
                     priority=requested.priority,
                     max_attempts=requested.max_attempts or self.registry.create(requested.kind).max_attempts,
-                    metadata=requested.metadata,
                 )
             self.store.queue.complete(record.id, metadata=result.metadata, message=result.message)
         except Exception as error:
-            retry_at = datetime.now(timezone.utc) + timedelta(seconds=self.retry_delay_seconds)
-            self.store.queue.fail(record.id, ''.join(traceback.format_exception_only(type(error), error)).strip(), retry_at=retry_at)
+            self.store.queue.fail(
+                record.id,
+                ''.join(traceback.format_exception_only(type(error), error)).strip(),
+                retry=self.retry_delay_seconds >= 0,
+            )
         return True
 
     def run_until_empty(self, *, max_jobs: int | None = None) -> int:

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from six2one.e621 import E621Client
-from six2one.storage import create_storage, import_storage_exports, open_storage, validate_storage
+from six2one.storage import create_storage, import_storage_exports, open_storage, pending_storage_migrations, validate_storage
 
 from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.errors import BootstrapError, BootstrapRequiredError
@@ -101,6 +101,19 @@ class Bootstrap:
         if not validation.ready:
             raise BootstrapRequiredError("six2one has not been bootstrapped yet. Run `621 bootstrap`.")
 
+    def pending_migrations(self) -> tuple[str, ...]:
+        return pending_storage_migrations(self.config.storage_path)
+
+    def migrate(self, *, on_migration=None) -> BootstrapSummary:
+        """Apply pending storage migrations without re-importing exports."""
+
+        if not self.config.storage_path.exists():
+            raise BootstrapRequiredError("six2one has not been bootstrapped yet. Run `621 bootstrap`.")
+        pending = self.pending_migrations()
+        with create_storage(self.config.storage_path, on_migration=on_migration):
+            pass
+        return self.summary(changed=bool(pending))
+
     def run(self, *, e621: Any | None = None, import_exports: bool = True) -> BootstrapSummary:
         validation = self.validate()
         if validation.ready:
@@ -188,10 +201,11 @@ class BootstrapCommand:
     text: Text
     e621: Any | None = None
     import_exports: bool = True
+    migrate: bool = False
 
     @classmethod
     def from_args(cls, args: Any) -> "BootstrapCommand":
-        return cls(config=SixTwoOneConfig.from_args(args), text=Text.for_cli(args))
+        return cls(config=SixTwoOneConfig.from_args(args), text=Text.for_cli(args), migrate=bool(getattr(args, "migrate", False)))
 
     def run(self) -> int:
         bootstrap = Bootstrap(self.config)
@@ -206,6 +220,11 @@ class BootstrapCommand:
             "detail_4": "Marker                   pending",
         }
         try:
+            if self.migrate:
+                summary = self._run_migrate(bootstrap, live_values)
+                self._print_summary(summary)
+                return 0
+
             validation = bootstrap.validate()
             if validation.ready:
                 summary = bootstrap.summary(changed=False)
@@ -225,6 +244,44 @@ class BootstrapCommand:
             return 1
         finally:
             self.text.finish()
+
+    def _run_migrate(self, bootstrap: Bootstrap, live_values: dict[str, str]) -> BootstrapSummary:
+        live_values = {
+            **live_values,
+            "phase": "Phase 1/3: Checking pending migrations",
+            "detail_1": "Storage                  opening",
+            "detail_2": "Migrations               checking",
+            "detail_3": "Current migration        none",
+            "detail_4": "Summary                  pending",
+        }
+        with self.text.scratch(LIVE, live_values) as scratch:
+            pending = bootstrap.pending_migrations()
+            scratch.update(
+                {
+                    "phase": "Phase 2/3: Applying storage migrations",
+                    "detail_1": "Storage                  ready",
+                    "detail_2": f"Migrations               {len(pending)} pending",
+                    "detail_3": "Current migration        waiting" if pending else "Current migration        none",
+                }
+            )
+
+            def on_migration(migration) -> None:
+                scratch.update(
+                    {
+                        "detail_3": f"Current migration        {migration.version}_{migration.name}",
+                    }
+                )
+
+            summary = bootstrap.migrate(on_migration=on_migration)
+            scratch.update(
+                {
+                    "phase": "Phase 3/3: Migration complete",
+                    "detail_2": f"Migrations               {'applied' if pending else 'already current'}",
+                    "detail_4": "Summary                  ready",
+                }
+            )
+            scratch.delete()
+            return summary
 
     def _values(self, summary: BootstrapSummary) -> dict[str, str]:
         return {
@@ -254,10 +311,11 @@ def run_bootstrap(
     e621: Any | None = None,
     text: Text | None = None,
     import_exports: bool = True,
+    migrate: bool = False,
 ) -> BootstrapSummary:
     """Programmatic bootstrap entry point for CLI glue and tests."""
 
-    command = BootstrapCommand(config=config, text=text or Text(), e621=e621, import_exports=import_exports)
+    command = BootstrapCommand(config=config, text=text or Text(), e621=e621, import_exports=import_exports, migrate=migrate)
     code = command.run()
     if code != 0:
         raise BootstrapError("bootstrap command failed")

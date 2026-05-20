@@ -1,533 +1,537 @@
 from __future__ import annotations
 
-import json
-from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping
-from typing import Any, Literal
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
 
-from .base import BaseStore
-from ..models.tag import (
-    Tag,
-    TagAlias,
-    TagCategory,
-    TagDatabaseStatus,
-    TagImportResult,
-    TagResolution,
-    TagSet,
-    UnresolvedImplication,
-    WildcardExpansion,
-    normalize_implication_status,
-    normalize_tag_name,
-)
-
-SCHEMA_VERSION = 1
-REQUIRED_TABLES = frozenset({
-    "tags",
-    "tag_aliases",
-    "tag_implications",
-    "tag_implication_closure",
-    "unresolved_tag_implications",
-})
+from .base import BaseRepository
+from ..database import TagNotFound
+from ..models import AliasStatus, Found, Lookup, Missing, Tag, TagCategory, TagId, TagNameSet, TagResolution, normalize_tag_name
+from ..models.time import utc_now_ms
 
 
-class TagsStore(BaseStore):
-    """Business-facing API for e621 tag metadata stored in six2one storage."""
+@dataclass(frozen=True, slots=True)
+class TagImportReport:
+    export_date: str
+    tags_count: int
+    aliases_count: int
+    implications_count: int
+    closure_count: int
+    unresolved_count: int = 0
 
-    def get(self, name: str) -> Tag | None:
-        normalized = normalize_tag_name(name)
-        alias = self.alias_for(normalized)
-        lookup = alias.consequent_normalized if alias is not None else normalized
-        return self.database.fetch_model(
+
+@dataclass(frozen=True, slots=True)
+class TagStatus:
+    ready: bool
+    tags_count: int
+    aliases_count: int
+    implications_count: int
+    closure_count: int
+    unresolved_count: int
+    diagnostics: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class UnresolvedTagImplication:
+    antecedent_name: str
+    consequent_name: str
+    status_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class TagWildcardExpansion:
+    matches: TagNameSet
+    truncated: bool
+
+
+class TagRepository(BaseRepository):
+    """Intent-focused tag API backed by integer tag edges."""
+
+    def get(self, tag_id: TagId) -> Tag:
+        tag = self.database.fetch_model(
             Tag,
-            """
-            SELECT id, name, category, post_count, created_at, updated_at, is_deprecated
-            FROM tags
-            WHERE name = ? OR lower(replace(name, ' ', '_')) = ?
-            ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END
-            LIMIT 1
-            """,
-            (lookup, lookup, lookup),
+            "SELECT * FROM tags WHERE tag_id = ?",
+            (int(tag_id),),
         )
+        if tag is None:
+            raise TagNotFound(f"Tag not found: {tag_id}")
+        return tag
 
-    def get_by_id(self, tag_id: int) -> Tag | None:
-        return self.database.fetch_model(
-            Tag,
-            """
-            SELECT id, name, category, post_count, created_at, updated_at, is_deprecated
-            FROM tags
-            WHERE id = ?
-            """,
-            (tag_id,),
-        )
+    def get_by_name(self, name: str) -> Tag:
+        result = self.find_by_name(name)
+        if isinstance(result, Missing):
+            raise TagNotFound(f"Tag not found: {name}")
+        return result.value
 
-    def alias_for(self, name: str) -> TagAlias | None:
+    def find_by_name(self, name: str) -> Lookup[Tag, str]:
         normalized = normalize_tag_name(name)
-        return self.database.fetch_model(
-            TagAlias,
-            """
-            SELECT id, antecedent_name, consequent_name, antecedent_normalized,
-                   consequent_normalized, status, created_at, updated_at
-            FROM tag_aliases
-            WHERE antecedent_normalized = ? AND status = 'active'
-            ORDER BY id DESC
-            LIMIT 1
-            """,
+        tag = self.database.fetch_model(
+            Tag,
+            "SELECT * FROM tags WHERE normalized_name = ?",
             (normalized,),
         )
-
-    def category(self, name: str) -> TagCategory | None:
-        tag = self.get(name)
-        return tag.category if tag is not None else None
-
-    def post_count(self, name: str) -> int | None:
-        tag = self.get(name)
-        return tag.post_count if tag is not None else None
-
-    def implies(self, name: str, *, direct: bool = False) -> TagSet:
-        tag = self.get(name)
         if tag is None:
-            return TagSet.empty(root=normalize_tag_name(name), source="implies")
-        if direct:
-            sql = """
-                SELECT implied.id, implied.name, implied.category, implied.post_count,
-                       implied.created_at, implied.updated_at, implied.is_deprecated
-                FROM tag_implications AS edge
-                JOIN tags AS implied ON implied.id = edge.consequent_tag_id
-                WHERE edge.antecedent_tag_id = ? AND edge.status = 'active'
-                ORDER BY implied.name
-            """
-        else:
-            sql = """
-                SELECT implied.id, implied.name, implied.category, implied.post_count,
-                       implied.created_at, implied.updated_at, implied.is_deprecated
-                FROM tag_implication_closure AS closure
-                JOIN tags AS implied ON implied.id = closure.consequent_tag_id
-                WHERE closure.antecedent_tag_id = ?
-                ORDER BY closure.depth, implied.name
-            """
-        return self._tag_set(sql, (tag.id,), root=tag.name, source="implies")
+            return Missing(normalized)
+        return Found(tag)
 
-    def implied_by(self, name: str, *, direct: bool = False) -> TagSet:
-        tag = self.get(name)
-        if tag is None:
-            return TagSet.empty(root=normalize_tag_name(name), source="implied_by")
-        if direct:
-            sql = """
-                SELECT implying.id, implying.name, implying.category, implying.post_count,
-                       implying.created_at, implying.updated_at, implying.is_deprecated
-                FROM tag_implications AS edge
-                JOIN tags AS implying ON implying.id = edge.antecedent_tag_id
-                WHERE edge.consequent_tag_id = ? AND edge.status = 'active'
-                ORDER BY COALESCE(implying.post_count, 0) DESC, implying.name
-            """
-        else:
-            sql = """
-                SELECT implying.id, implying.name, implying.category, implying.post_count,
-                       implying.created_at, implying.updated_at, implying.is_deprecated
-                FROM tag_implication_closure AS closure
-                JOIN tags AS implying ON implying.id = closure.antecedent_tag_id
-                WHERE closure.consequent_tag_id = ?
-                ORDER BY closure.depth, COALESCE(implying.post_count, 0) DESC, implying.name
-            """
-        return self._tag_set(sql, (tag.id,), root=tag.name, source="implied_by")
+    def resolve_alias(self, name: str) -> TagResolution:
+        return self.resolve(name)
 
     def resolve(self, name: str) -> TagResolution:
-        raw_normalized = normalize_tag_name(name)
-        alias = self.alias_for(raw_normalized)
-        canonical_name = alias.consequent_normalized if alias is not None else raw_normalized
-        tag = self.get(canonical_name)
-        if tag is None:
-            empty = TagSet.empty(root=canonical_name)
-            diagnostics = ("UNKNOWN_TAG",)
-            if alias is not None:
-                diagnostics = ("ALIAS_TARGET_UNKNOWN",)
+        requested = normalize_tag_name(name)
+        canonical_name = self._canonical_name(requested)
+        tag_result = self.find_by_name(canonical_name)
+        if isinstance(tag_result, Missing):
             return TagResolution(
-                raw=name,
-                canonical_name=canonical_name,
-                found=False,
+                requested=requested,
                 tag=None,
-                implies=empty,
-                implied_by=empty,
-                match=empty,
-                exclude=empty,
-                alias_applied=alias is not None,
-                alias_from=alias.antecedent_name if alias else None,
-                alias_to=alias.consequent_name if alias else None,
-                diagnostics=diagnostics,
+                found=False,
+                alias_applied=canonical_name != requested,
+                alias_from=requested if canonical_name != requested else None,
+                alias_to=canonical_name if canonical_name != requested else None,
             )
-        implies = self.implies(tag.name)
-        implied_by = self.implied_by(tag.name)
-        self_set = TagSet.of((tag,), root=tag.name, source="self")
-        match = TagSet.union(self_set, implied_by, root=tag.name, source="query_match")
+
+        tag = tag_result.value
+        implies = self._closure_names(int(tag.id), direction="ancestors")
+        implied_by = self._closure_names(int(tag.id), direction="descendants")
+        match = TagNameSet((tag.name, *implied_by))
         return TagResolution(
-            raw=name,
-            canonical_name=tag.name,
-            found=True,
+            requested=requested,
             tag=tag,
-            implies=implies,
-            implied_by=implied_by,
+            found=True,
+            alias_applied=canonical_name != requested,
+            alias_from=requested if canonical_name != requested else None,
+            alias_to=canonical_name if canonical_name != requested else None,
+            implies=TagNameSet(implies),
+            implied_by=TagNameSet(implied_by),
             match=match,
             exclude=match,
-            alias_applied=alias is not None,
-            alias_from=alias.antecedent_name if alias else None,
-            alias_to=alias.consequent_name if alias else None,
         )
 
-    def expand(self, pattern: str, *, limit: int = 40, order_by: Literal["post_count", "name"] = "post_count") -> WildcardExpansion:
-        normalized = normalize_tag_name(pattern)
-        like = _wildcard_like(normalized)
-        order_sql = "COALESCE(post_count, 0) DESC, name" if order_by == "post_count" else "name"
-        rows = self.database.fetch_all(
-            f"""
-            SELECT id, name, category, post_count, created_at, updated_at, is_deprecated
-            FROM tags
-            WHERE name LIKE ? ESCAPE '\\'
-            ORDER BY {order_sql}
-            LIMIT ?
-            """,
-            (like, limit + 1),
-        )
-        tags = tuple(Tag.from_row(row) for row in rows[:limit])
-        return WildcardExpansion(
-            raw_pattern=pattern,
-            normalized_pattern=normalized,
-            matches=TagSet.of(tags, root=normalized, source="wildcard"),
-            limit=limit,
-            truncated=len(rows) > limit,
-            ordered_by=order_by,
-        )
-
-    def unresolved_implications(self, *, limit: int | None = None) -> tuple[UnresolvedImplication, ...]:
-        sql = """
-            SELECT id, antecedent_name_snapshot, consequent_name_snapshot,
-                   status, created_at, updated_at
-            FROM unresolved_tag_implications
-            ORDER BY id
-        """
-        params: tuple[Any, ...] = ()
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (limit,)
-        return tuple(
-            UnresolvedImplication(
-                id=int(row["id"]),
-                antecedent_name=row["antecedent_name_snapshot"],
-                consequent_name=row["consequent_name_snapshot"],
-                status=row["status"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
-            for row in self.database.fetch_all(sql, params)
-        )
-
-    def status(self) -> TagDatabaseStatus:
-        tables = self._tables()
-        diagnostics: list[str] = []
-        missing = REQUIRED_TABLES - tables
-        if missing:
-            diagnostics.append("MISSING_TABLES:" + ",".join(sorted(missing)))
-        counts = self._counts()
-        schema = self._schema_version()
-        if schema != SCHEMA_VERSION:
-            diagnostics.append("TAG_SCHEMA_VERSION_MISMATCH")
-        if counts["tags"] == 0:
-            diagnostics.append("NO_TAGS")
-        return TagDatabaseStatus(
-            ready=not diagnostics,
-            schema_version=schema,
-            tags_count=counts["tags"],
-            aliases_count=counts["tag_aliases"],
-            implications_count=counts["tag_implications"],
-            closure_count=counts["tag_implication_closure"],
-            unresolved_count=counts["unresolved_tag_implications"],
-            diagnostics=tuple(diagnostics),
-        )
-
-    def replace_from_exports(
-        self,
-        *,
-        tags: Iterable[Mapping[str, Any] | Any],
-        aliases: Iterable[Mapping[str, Any] | Any] = (),
-        implications: Iterable[Mapping[str, Any] | Any],
-        export_date: str,
-        snapshot: str | None = None,
-        tags_export: str = "tags",
-        aliases_export: str = "tag_aliases",
-        implications_export: str = "tag_implications",
-    ) -> TagImportResult:
-        """Replace tag tables from e621 export rows and rebuild closure."""
-
-        with self.database.transaction():
-            for table in (
-                "tag_implication_closure",
-                "unresolved_tag_implications",
-                "tag_implications",
-                "tag_aliases",
-                "tags",
-            ):
-                self.database.execute(f"DELETE FROM {table}")
-
-        name_to_id = self._load_tags(tags)
-        aliases_count = self._load_aliases(aliases)
-        implications_count, unresolved_count = self._load_implications(implications, name_to_id)
-        closure_count = self._build_closure()
+    def status(self) -> TagStatus:
         tags_count = self._count("tags")
-        snapshot_value = snapshot or f"e621-{export_date}"
-        self._write_metadata(
-            {
-                "schema_version": str(SCHEMA_VERSION),
-                "snapshot": snapshot_value,
-                "export_date": export_date,
-                "tags_export": tags_export,
-                "tag_aliases_export": aliases_export,
-                "tag_implications_export": implications_export,
-                "tags_count": str(tags_count),
-                "aliases_count": str(aliases_count),
-                "implications_count": str(implications_count),
-                "closure_count": str(closure_count),
-                "unresolved_count": str(unresolved_count),
-            }
-        )
-        return TagImportResult(
-            snapshot=snapshot_value,
-            export_date=export_date,
+        aliases_count = self._count("tag_aliases")
+        implications_count = self._count("tag_implications")
+        closure_count = self._count("tag_implication_closure")
+        unresolved_count = self._count("tag_import_unresolved")
+        diagnostics: list[str] = []
+        if tags_count == 0:
+            diagnostics.append("TAGS_MISSING")
+        return TagStatus(
+            ready=not diagnostics,
             tags_count=tags_count,
             aliases_count=aliases_count,
             implications_count=implications_count,
             closure_count=closure_count,
             unresolved_count=unresolved_count,
+            diagnostics=tuple(diagnostics),
         )
 
-    def _load_tags(self, rows: Iterable[Mapping[str, Any] | Any]) -> dict[str, int]:
-        values: list[tuple[Any, ...]] = []
-        name_to_id: dict[str, int] = {}
-        synthetic_id = -1
-        for raw in rows:
-            row = _row(raw)
-            tag_id = _int(_first(row, "id"))
-            if tag_id is None:
-                tag_id = synthetic_id
-                synthetic_id -= 1
-            name = normalize_tag_name(_first(row, "name") or "")
-            if not name:
-                continue
-            name_to_id[name] = tag_id
-            values.append(
-                (
-                    tag_id,
-                    name,
-                    _int(_first(row, "category"), default=TagCategory.UNKNOWN.value),
-                    _int(_first(row, "post_count", "post_count_cache")),
-                    _first(row, "created_at"),
-                    _first(row, "updated_at"),
-                    _bool(_first(row, "is_deprecated", "is_deleted", "is_invalid")),
-                    json.dumps(row, ensure_ascii=False),
+    def import_exports(
+        self,
+        *,
+        tags: Iterable[Mapping[str, object]],
+        aliases: Iterable[Mapping[str, object]] = (),
+        implications: Iterable[Mapping[str, object]] = (),
+        export_date: str,
+    ) -> TagImportReport:
+        now_ms = utc_now_ms()
+        with self.database.write_if_needed():
+            self.database.execute("DELETE FROM tag_import_unresolved")
+            tag_count = self._import_tags(tags, now_ms=now_ms)
+            alias_count = self._import_aliases(aliases)
+            implication_count, unresolved_count = self._import_implications(implications, now_ms=now_ms)
+            closure_count = self._build_implication_closure()
+        return TagImportReport(
+            export_date=export_date,
+            tags_count=tag_count,
+            aliases_count=alias_count,
+            implications_count=implication_count,
+            closure_count=closure_count,
+            unresolved_count=unresolved_count,
+        )
+
+    def for_post(self, post_id: int) -> tuple[Tag, ...]:
+        return self.database.fetch_models(
+            Tag,
+            """
+            SELECT t.*
+            FROM post_tag_edges AS e
+            JOIN tags AS t ON t.tag_id = e.tag_id
+            WHERE e.post_id = ?
+            ORDER BY t.category_id, t.name
+            """,
+            (int(post_id),),
+        )
+
+    def names_for_post(self, post_id: int) -> tuple[str, ...]:
+        rows = self.database.fetch_all(
+            """
+            SELECT t.name
+            FROM post_tag_edges AS e
+            JOIN tags AS t ON t.tag_id = e.tag_id
+            WHERE e.post_id = ?
+            ORDER BY t.category_id, t.name
+            """,
+            (int(post_id),),
+        )
+        return tuple(str(row["name"]) for row in rows)
+
+    def save(
+        self,
+        *,
+        name: str,
+        category: TagCategory = TagCategory.GENERAL,
+        source_tag_id: int | None = None,
+        post_count: int = 0,
+        flags: int = 0,
+    ) -> Tag:
+        normalized = normalize_tag_name(name)
+        now_ms = utc_now_ms()
+        with self.database.write_if_needed():
+            self.database.execute(
+                """
+                INSERT INTO tags (
+                    source_tag_id, name, normalized_name, category_id,
+                    post_count, flags, cached_ms
                 )
-            )
-        with self.database.transaction():
-            self.database.execute_many(
-                """
-                INSERT OR REPLACE INTO tags (
-                    id, name, category, post_count, created_at, updated_at,
-                    is_deprecated, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(normalized_name) DO UPDATE SET
+                    source_tag_id = COALESCE(excluded.source_tag_id, tags.source_tag_id),
+                    name = excluded.name,
+                    category_id = excluded.category_id,
+                    post_count = excluded.post_count,
+                    flags = excluded.flags,
+                    cached_ms = excluded.cached_ms
                 """,
-                values,
-            )
-        return name_to_id
-
-    def _load_aliases(self, rows: Iterable[Mapping[str, Any] | Any]) -> int:
-        values: list[tuple[Any, ...]] = []
-        synthetic_id = -1
-        for raw in rows:
-            row = _row(raw)
-            alias_id = _int(_first(row, "id"))
-            if alias_id is None:
-                alias_id = synthetic_id
-                synthetic_id -= 1
-            antecedent_name = _first(row, "antecedent_name", "antecedent") or ""
-            consequent_name = _first(row, "consequent_name", "consequent") or ""
-            antecedent_key = normalize_tag_name(antecedent_name)
-            consequent_key = normalize_tag_name(consequent_name)
-            if not antecedent_key or not consequent_key:
-                continue
-            values.append(
                 (
-                    alias_id,
-                    antecedent_name,
-                    consequent_name,
-                    antecedent_key,
-                    consequent_key,
-                    normalize_implication_status(_first(row, "status")),
-                    _first(row, "created_at"),
-                    _first(row, "updated_at"),
-                    _int(_first(row, "creator_id")),
-                    _int(_first(row, "approver_id")),
-                    _first(row, "reason"),
-                    json.dumps(row, ensure_ascii=False),
-                )
+                    source_tag_id,
+                    normalized,
+                    normalized,
+                    int(category),
+                    int(post_count),
+                    int(flags),
+                    now_ms,
+                ),
             )
-        with self.database.transaction():
+        return self.get_by_name(normalized)
+
+    def save_many(self, tags: Iterable[tuple[str, TagCategory]]) -> int:
+        now_ms = utc_now_ms()
+        rows = [
+            (normalize_tag_name(name), normalize_tag_name(name), int(category), now_ms)
+            for name, category in tags
+        ]
+        if not rows:
+            return 0
+        with self.database.write_if_needed():
             self.database.execute_many(
                 """
-                INSERT OR REPLACE INTO tag_aliases (
-                    id, antecedent_name, consequent_name, antecedent_normalized,
-                    consequent_normalized, status, created_at, updated_at,
-                    creator_id, approver_id, reason, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO tags (name, normalized_name, category_id, cached_ms)
+                VALUES (?, ?, ?, ?)
                 """,
-                values,
+                rows,
             )
-        return len(values)
+        return len(rows)
 
-    def _load_implications(self, rows: Iterable[Mapping[str, Any] | Any], name_to_id: Mapping[str, int]) -> tuple[int, int]:
-        implication_rows: list[tuple[Any, ...]] = []
-        unresolved_rows: list[tuple[Any, ...]] = []
-        synthetic_id = -1
-        for raw in rows:
-            row = _row(raw)
-            implication_id = _int(_first(row, "id"))
-            if implication_id is None:
-                implication_id = synthetic_id
-                synthetic_id -= 1
-            antecedent_name = _first(row, "antecedent_name", "antecedent") or ""
-            consequent_name = _first(row, "consequent_name", "consequent") or ""
-            antecedent_id = name_to_id.get(normalize_tag_name(antecedent_name))
-            consequent_id = name_to_id.get(normalize_tag_name(consequent_name))
-            status = normalize_implication_status(_first(row, "status"))
-            raw_json = json.dumps(row, ensure_ascii=False)
-            if antecedent_id is None or consequent_id is None:
-                unresolved_rows.append((implication_id, antecedent_name, consequent_name, _first(row, "created_at"), _first(row, "updated_at"), status, raw_json))
-                continue
-            implication_rows.append((implication_id, antecedent_id, consequent_id, _first(row, "created_at"), _first(row, "updated_at"), status, antecedent_name, consequent_name, _first(row, "reason"), _int(_first(row, "creator_id")), _int(_first(row, "approver_id")), raw_json))
-        with self.database.transaction():
-            self.database.execute_many(
+    def ids_for_names(self, names: Iterable[str]) -> dict[str, TagId]:
+        normalized_names = tuple(sorted({normalize_tag_name(name) for name in names}))
+        if not normalized_names:
+            return {}
+        placeholders = ",".join("?" for _ in normalized_names)
+        rows = self.database.fetch_all(
+            f"""
+            SELECT normalized_name, tag_id
+            FROM tags
+            WHERE normalized_name IN ({placeholders})
+            """,
+            normalized_names,
+        )
+        return {str(row["normalized_name"]): TagId(int(row["tag_id"])) for row in rows}
+
+    def implies(self, name: str) -> TagNameSet:
+        result = self.find_by_name(self._canonical_name(name))
+        if isinstance(result, Missing):
+            return TagNameSet(())
+        return TagNameSet(self._closure_names(int(result.value.id), direction="ancestors"))
+
+    def implied_by(self, name: str) -> TagNameSet:
+        result = self.find_by_name(self._canonical_name(name))
+        if isinstance(result, Missing):
+            return TagNameSet(())
+        return TagNameSet(self._closure_names(int(result.value.id), direction="descendants"))
+
+    def expand(self, pattern: str, *, limit: int = 40) -> TagWildcardExpansion:
+        normalized_pattern = normalize_tag_name(pattern)
+        like_pattern = normalized_pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like_pattern = like_pattern.replace("*", "%").replace("?", "_")
+        rows = self.database.fetch_all(
+            """
+            SELECT name
+            FROM tags
+            WHERE normalized_name LIKE ? ESCAPE '\\'
+              AND post_count > 0
+            ORDER BY post_count DESC, name
+            LIMIT ?
+            """,
+            (like_pattern, int(limit) + 1),
+        )
+        names = tuple(str(row["name"]) for row in rows if fnmatchcase(str(row["name"]), normalized_pattern))
+        return TagWildcardExpansion(matches=TagNameSet(names[:limit]), truncated=len(names) > limit)
+
+    def unresolved_implications(self) -> tuple[UnresolvedTagImplication, ...]:
+        rows = self.database.fetch_all(
+            """
+            SELECT antecedent_name, consequent_name, status_id
+            FROM tag_import_unresolved
+            WHERE relation_kind = 'implication'
+            ORDER BY antecedent_name, consequent_name
+            """
+        )
+        return tuple(
+            UnresolvedTagImplication(
+                antecedent_name=str(row["antecedent_name"]),
+                consequent_name=str(row["consequent_name"]),
+                status_id=int(row["status_id"]),
+            )
+            for row in rows
+        )
+
+    def _canonical_name(self, name: str) -> str:
+        current = normalize_tag_name(name)
+        seen: set[str] = set()
+        for _ in range(16):
+            if current in seen:
+                return current
+            seen.add(current)
+            row = self.database.fetch_one(
                 """
-                INSERT OR REPLACE INTO tag_implications (
-                    id, antecedent_tag_id, consequent_tag_id, created_at, updated_at,
-                    status, antecedent_name_snapshot, consequent_name_snapshot,
-                    reason, creator_id, approver_id, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT consequent.name
+                FROM tag_aliases AS alias
+                JOIN tags AS antecedent ON antecedent.tag_id = alias.antecedent_tag_id
+                JOIN tags AS consequent ON consequent.tag_id = alias.consequent_tag_id
+                WHERE antecedent.normalized_name = ?
+                  AND alias.status_id = ?
+                ORDER BY alias.updated_ms DESC NULLS LAST, alias.created_ms DESC NULLS LAST
+                LIMIT 1
                 """,
-                implication_rows,
+                (current, int(AliasStatus.ACTIVE)),
             )
-            self.database.execute_many(
-                """
-                INSERT OR REPLACE INTO unresolved_tag_implications (
-                    id, antecedent_name_snapshot, consequent_name_snapshot,
-                    created_at, updated_at, status, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                unresolved_rows,
-            )
-        return len(implication_rows), len(unresolved_rows)
+            if row is None:
+                return current
+            current = str(row["name"])
+        return current
 
-    def _build_closure(self) -> int:
-        adjacency: dict[int, set[int]] = defaultdict(set)
-        for row in self.database.fetch_all("SELECT antecedent_tag_id, consequent_tag_id FROM tag_implications WHERE status = 'active'"):
-            source = int(row["antecedent_tag_id"])
-            target = int(row["consequent_tag_id"])
-            if source != target:
-                adjacency[source].add(target)
-        values: list[tuple[int, int, int, int | None]] = []
-        for source in sorted(adjacency):
-            values.extend(_closure_for(source, adjacency))
-        with self.database.transaction():
-            self.database.execute_many(
-                """
-                INSERT OR REPLACE INTO tag_implication_closure (
-                    antecedent_tag_id, consequent_tag_id, depth, via_tag_id
-                ) VALUES (?, ?, ?, ?)
-                """,
-                values,
-            )
-        return len(values)
-
-    def _tag_set(self, sql: str, params: tuple[Any, ...], *, root: str, source: str) -> TagSet:
-        return TagSet.of(self.database.fetch_models(Tag, sql, params), root=root, source=source)
-
-    def _tables(self) -> set[str]:
-        return {str(row["name"]) for row in self.database.fetch_all("SELECT name FROM sqlite_master WHERE type = 'table'")}
-
-    def _counts(self) -> dict[str, int]:
-        return {name: self._count(name) for name in ("tags", "tag_aliases", "tag_implications", "tag_implication_closure", "unresolved_tag_implications")}
+    def _closure_names(self, tag_id: int, *, direction: str) -> tuple[str, ...]:
+        if direction == "ancestors":
+            join_column = "consequent_tag_id"
+            where_column = "antecedent_tag_id"
+        elif direction == "descendants":
+            join_column = "antecedent_tag_id"
+            where_column = "consequent_tag_id"
+        else:
+            raise ValueError(f"unsupported closure direction: {direction}")
+        rows = self.database.fetch_all(
+            f"""
+            SELECT tags.name
+            FROM tag_implication_closure AS closure
+            JOIN tags ON tags.tag_id = closure.{join_column}
+            WHERE closure.{where_column} = ?
+            ORDER BY closure.depth, tags.post_count DESC, tags.name
+            """,
+            (tag_id,),
+        )
+        return tuple(str(row["name"]) for row in rows)
 
     def _count(self, table: str) -> int:
-        if table not in self._tables():
-            return 0
-        row = self.database.fetch_one(f"SELECT COUNT(*) AS count FROM {table}")
-        return int(row["count"]) if row is not None else 0
+        if table not in {"tags", "tag_aliases", "tag_implications", "tag_implication_closure", "tag_import_unresolved"}:
+            raise ValueError(f"unsupported tag count table: {table}")
+        return int(self.database.fetch_scalar(f"SELECT COUNT(*) FROM {table}") or 0)
 
-    def _schema_version(self) -> int | None:
-        row = self.database.fetch_one("SELECT value FROM storage_metadata WHERE namespace = 'tags' AND key = 'schema_version'")
-        if row is None:
-            return None
-        try:
-            return int(row["value"])
-        except (TypeError, ValueError):
-            return None
-
-    def _write_metadata(self, values: Mapping[str, str]) -> None:
-        with self.database.transaction():
-            for key, value in values.items():
-                self.database.execute(
-                    """
-                    INSERT INTO storage_metadata (namespace, key, value, updated_at)
-                    VALUES ('tags', ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(namespace, key) DO UPDATE SET
-                        value = excluded.value,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (key, value),
+    def _import_tags(self, rows: Iterable[Mapping[str, object]], *, now_ms: int) -> int:
+        batch: list[tuple[object, ...]] = []
+        count = 0
+        for row in rows:
+            raw_name = str(row.get("name") or "").strip()
+            if not raw_name:
+                continue
+            name = normalize_tag_name(raw_name)
+            batch.append(
+                (
+                    _optional_int(row.get("id")),
+                    name,
+                    name,
+                    int(TagCategory.from_e621(row.get("category"))),
+                    _optional_int(row.get("post_count")) or 0,
+                    1 if _truthy(row.get("is_deprecated")) else 0,
+                    now_ms,
                 )
+            )
+            if len(batch) >= 10_000:
+                self._write_tags(batch)
+                count += len(batch)
+                batch.clear()
+        if batch:
+            self._write_tags(batch)
+            count += len(batch)
+        return count
+
+    def _write_tags(self, rows: list[tuple[object, ...]]) -> None:
+        self.database.execute_many(
+            """
+            INSERT INTO tags (
+                source_tag_id, name, normalized_name, category_id, post_count, flags, cached_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(normalized_name) DO UPDATE SET
+                source_tag_id = COALESCE(excluded.source_tag_id, tags.source_tag_id),
+                name = excluded.name,
+                category_id = excluded.category_id,
+                post_count = excluded.post_count,
+                flags = excluded.flags,
+                cached_ms = excluded.cached_ms
+            """,
+            rows,
+        )
+
+    def _import_aliases(self, rows: Iterable[Mapping[str, object]]) -> int:
+        batch: list[tuple[object, ...]] = []
+        count = 0
+        for row in rows:
+            antecedent = normalize_tag_name(str(row.get("antecedent_name") or ""))
+            consequent = normalize_tag_name(str(row.get("consequent_name") or ""))
+            ids = self.ids_for_names((antecedent, consequent))
+            if consequent not in ids:
+                continue
+            if antecedent not in ids:
+                self._write_tags([(None, antecedent, antecedent, int(TagCategory.INVALID), 0, 0, utc_now_ms())])
+                ids = self.ids_for_names((antecedent, consequent))
+            batch.append((int(ids[antecedent]), int(ids[consequent]), _alias_status(row.get("status"))))
+            if len(batch) >= 10_000:
+                self._write_aliases(batch)
+                count += len(batch)
+                batch.clear()
+        if batch:
+            self._write_aliases(batch)
+            count += len(batch)
+        return count
+
+    def _write_aliases(self, rows: list[tuple[object, ...]]) -> None:
+        self.database.execute_many(
+            """
+            INSERT INTO tag_aliases (antecedent_tag_id, consequent_tag_id, status_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(antecedent_tag_id, status_id, consequent_tag_id) DO UPDATE SET
+                status_id = excluded.status_id
+            """,
+            rows,
+        )
+
+    def _import_implications(self, rows: Iterable[Mapping[str, object]], *, now_ms: int) -> tuple[int, int]:
+        batch: list[tuple[object, ...]] = []
+        unresolved: list[tuple[object, ...]] = []
+        count = 0
+        for row in rows:
+            antecedent = normalize_tag_name(str(row.get("antecedent_name") or ""))
+            consequent = normalize_tag_name(str(row.get("consequent_name") or ""))
+            ids = self.ids_for_names((antecedent, consequent))
+            if antecedent not in ids or consequent not in ids:
+                unresolved.append(("implication", antecedent, consequent, _alias_status(row.get("status")), now_ms))
+                continue
+            batch.append((int(ids[antecedent]), int(ids[consequent]), _alias_status(row.get("status"))))
+            if len(batch) >= 10_000:
+                self._write_implications(batch)
+                count += len(batch)
+                batch.clear()
+        if batch:
+            self._write_implications(batch)
+            count += len(batch)
+        if unresolved:
+            self._write_unresolved(unresolved)
+        return count, len(unresolved)
+
+    def _write_implications(self, rows: list[tuple[object, ...]]) -> None:
+        self.database.execute_many(
+            """
+            INSERT INTO tag_implications (antecedent_tag_id, consequent_tag_id, status_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(antecedent_tag_id, consequent_tag_id) DO UPDATE SET
+                status_id = excluded.status_id
+            """,
+            rows,
+        )
+
+    def _write_unresolved(self, rows: list[tuple[object, ...]]) -> None:
+        self.database.execute_many(
+            """
+            INSERT INTO tag_import_unresolved (
+                relation_kind, antecedent_name, consequent_name, status_id, created_ms
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(relation_kind, antecedent_name, consequent_name) DO UPDATE SET
+                status_id = excluded.status_id,
+                created_ms = excluded.created_ms
+            """,
+            rows,
+        )
+
+    def _build_implication_closure(self) -> int:
+        self.database.execute("DELETE FROM tag_implication_closure")
+        rows = self.database.fetch_all(
+            """
+            SELECT antecedent_tag_id, consequent_tag_id
+            FROM tag_implications
+            WHERE status_id = ?
+            """,
+            (int(AliasStatus.ACTIVE),),
+        )
+        graph: dict[int, set[int]] = {}
+        for row in rows:
+            graph.setdefault(int(row["antecedent_tag_id"]), set()).add(int(row["consequent_tag_id"]))
+
+        closure_rows: list[tuple[int, int, int, int | None]] = []
+        for root in graph:
+            seen: set[int] = set()
+            stack = [(child, 1, child) for child in graph[root]]
+            while stack:
+                node, depth, via = stack.pop()
+                if node in seen or node == root:
+                    continue
+                seen.add(node)
+                closure_rows.append((root, node, depth, via))
+                for child in graph.get(node, ()):
+                    stack.append((child, depth + 1, via))
+        if closure_rows:
+            self.database.execute_many(
+                """
+                INSERT OR IGNORE INTO tag_implication_closure (
+                    antecedent_tag_id, consequent_tag_id, depth, via_tag_id
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                closure_rows,
+            )
+        return len(closure_rows)
 
 
-def _row(value: Mapping[str, Any] | Any) -> Mapping[str, Any]:
-    raw = getattr(value, "raw", None)
-    if raw is not None:
-        return raw
-    return value
-
-
-def _first(row: Mapping[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = row.get(key)
-        if value not in (None, ""):
-            return str(value)
-    return None
-
-
-def _int(value: str | None, *, default: int | None = None) -> int | None:
-    if value in (None, ""):
-        return default
-    try:
-        return int(str(value))
-    except ValueError:
-        return default
-
-
-def _bool(value: str | None) -> int | None:
-    if value is None:
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
         return None
-    return 1 if str(value).strip().lower() in {"1", "true", "t", "yes", "y"} else 0
+    try:
+        return int(float(str(value)))
+    except ValueError as error:
+        raise ValueError(f"Invalid integer in tag export: {value!r}") from error
 
 
-def _wildcard_like(pattern: str) -> str:
-    escaped = pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return escaped.replace("*", "%")
+def _truthy(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "t", "yes"}
 
 
-def _closure_for(source: int, adjacency: Mapping[int, set[int]]) -> list[tuple[int, int, int, int | None]]:
-    rows: list[tuple[int, int, int, int | None]] = []
-    visited: set[int] = set()
-    queue: deque[tuple[int, int, int | None]] = deque((target, 1, None) for target in sorted(adjacency.get(source, ())))
-    while queue:
-        target, depth, via = queue.popleft()
-        if target in visited:
-            continue
-        visited.add(target)
-        rows.append((source, target, depth, via))
-        for next_target in sorted(adjacency.get(target, ())):
-            if next_target not in visited:
-                queue.append((next_target, depth + 1, target))
-    return rows
+def _alias_status(value: object) -> int:
+    normalized = str(value or "active").strip().lower()
+    return {
+        "active": int(AliasStatus.ACTIVE),
+        "deleted": int(AliasStatus.DELETED),
+        "pending": int(AliasStatus.PENDING),
+        "rejected": int(AliasStatus.REJECTED),
+    }.get(normalized, int(AliasStatus.ACTIVE))

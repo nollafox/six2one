@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
 from six2one._commands.config import SixTwoOneConfig
 from six2one.storage import create_storage, open_storage
+from six2one.storage.models import ImageVariant
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,7 @@ class QuerySidecarData:
         favorites: Mapping[int, Iterable[Mapping[str, Any]]] | None = None,
         votes: Mapping[int, Iterable[Mapping[str, Any]]] | None = None,
         approvals: Mapping[int, Iterable[Mapping[str, Any]]] | None = None,
+        pools: Mapping[int, Iterable[Mapping[str, Any]]] | None = None,
         sets: Mapping[int, Iterable[Mapping[str, Any]]] | None = None,
         replacements: Mapping[int, Iterable[Mapping[str, Any]]] | None = None,
         deletion_events: Mapping[int, Iterable[Mapping[str, Any]]] | None = None,
@@ -91,6 +94,7 @@ class QuerySidecarData:
         self._favorites = favorites or {}
         self._votes = votes or {}
         self._approvals = approvals or {}
+        self._pools = pools or {}
         self._sets = sets or {}
         self._replacements = replacements or {}
         self._deletion_events = deletion_events or {}
@@ -101,6 +105,7 @@ class QuerySidecarData:
     def favorites_for(self, post_id: int): return tuple(self._favorites.get(post_id, ()))
     def votes_for(self, post_id: int): return tuple(self._votes.get(post_id, ()))
     def approvals_for(self, post_id: int): return tuple(self._approvals.get(post_id, ()))
+    def pools_for(self, post_id: int): return tuple(self._pools.get(post_id, ()))
     def sets_for(self, post_id: int): return tuple(self._sets.get(post_id, ()))
     def replacements_for(self, post_id: int): return tuple(self._replacements.get(post_id, ()))
     def deletion_events_for(self, post_id: int): return tuple(self._deletion_events.get(post_id, ()))
@@ -188,6 +193,28 @@ def initialized_config(tmp_path) -> SixTwoOneConfig:
     return config
 
 
+def import_test_posts(storage, *posts: Mapping[str, Any]):
+    """Import fixture posts through the same staged path production uses."""
+
+    return storage.imports.import_posts(posts)
+
+
+def mark_test_image_downloaded(storage, *, post_id: int, variant: str | ImageVariant, local_path, bytes_written: int = 0):
+    resolved_variant = variant if isinstance(variant, ImageVariant) else {
+        "original": ImageVariant.ORIGINAL,
+        "sample": ImageVariant.SAMPLE,
+        "preview": ImageVariant.PREVIEW,
+    }[variant]
+    storage.files.mark_downloaded(
+        post_id,
+        resolved_variant,
+        local_path=local_path,
+        bytes_written=bytes_written,
+        checksum=b"",
+        downloaded_at=datetime.now(timezone.utc),
+    )
+
+
 def install_semantic_tags(config: SixTwoOneConfig) -> None:
     """Install a tiny alias/implication graph into command storage."""
 
@@ -212,4 +239,4 @@ def install_semantic_tags(config: SixTwoOneConfig) -> None:
         {"id": 4, "antecedent_name": "spitz", "consequent_name": "domestic_dog", "status": "active"},
     ]
     with open_storage(config.storage_path) as storage:
-        storage.tags.replace_from_exports(tags=tags, aliases=aliases, implications=implications, export_date="2026-05-18")
+        storage.tags.import_exports(tags=tags, aliases=aliases, implications=implications, export_date="2026-05-18")

@@ -6,7 +6,7 @@ from ..models import JobKind
 
 
 class EnrichUsersJob(Job):
-    kind = JobKind.ENRICH_USERS.value
+    kind = JobKind.ENRICH_USERS
     title = "Enrich users"
 
     def run(self, context, *, user_ids: list[int] | None = None, names: list[str] | None = None, source_run_id: str | None = None) -> JobResult:
@@ -17,7 +17,7 @@ class EnrichUsersJob(Job):
             users.extend(context.e621.users.search(name_matches=name).all())
         maybe_upsert_many(context.store, "users", users)
         if user_ids:
-            context.store.enrichment.mark_ready(scope="user", keys=user_ids, dependency="UserIndex", source_run_id=source_run_id)
+            context.store.coverage.mark_ready(scope="user", keys=user_ids, dependency="UserIndex", source_run_id=source_run_id)
         if names:
-            context.store.enrichment.mark_ready(scope="user", keys=names, dependency="UserIndex", source_run_id=source_run_id)
+            context.store.coverage.mark_ready(scope="user", keys=names, dependency="UserIndex", source_run_id=source_run_id)
         return JobResult(metadata={"users": len(users)})

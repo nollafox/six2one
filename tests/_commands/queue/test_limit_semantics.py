@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.queue import run_queue
 from six2one.e621.collections import Collection
-from six2one.storage import create_storage, open_storage
+from six2one.storage import open_storage
 from tests.factories import post_payload
+from tests.support import initialized_config
 
 
 def test_queue_without_limit_materializes_every_page(tmp_path: Path):
-    config = SixTwoOneConfig(home=tmp_path / "home")
-    _initialize_storage(config)
+    config = initialized_config(tmp_path)
     e621 = _PagedE621(total_posts=321)
 
     result = run_queue(config, "dragon", limit=None, e621=e621)
@@ -25,8 +24,7 @@ def test_queue_without_limit_materializes_every_page(tmp_path: Path):
 
 
 def test_queue_with_limit_caps_materialized_posts(tmp_path: Path):
-    config = SixTwoOneConfig(home=tmp_path / "home")
-    _initialize_storage(config)
+    config = initialized_config(tmp_path)
     e621 = _PagedE621(total_posts=321)
 
     result = run_queue(config, "dragon", limit=10, e621=e621)
@@ -59,9 +57,3 @@ class _PagedPosts:
             return self.items[start:end]
 
         return Collection(fetch, page_size=page_size, start_page=int(page or 1))
-
-
-def _initialize_storage(config: SixTwoOneConfig) -> None:
-    with create_storage(config.storage_path):
-        pass
-

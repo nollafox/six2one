@@ -49,3 +49,24 @@ def test_export_record_types(client, fake_transport, tmp_path):
     assert alias.antecedent_name == "old"
     assert isinstance(implication, TagImplicationExportRecord)
     assert implication.consequent_name == "parent"
+
+
+def test_export_rows_skip_blank_csv_lines(client, fake_transport, tmp_path):
+    fake_transport.add_text(
+        "/db_export/",
+        """
+        <a href="tags-2026-05-16.csv.gz">tags</a>
+        """,
+    )
+    import gzip
+
+    raw = gzip.decompress(gz_csv([
+        {"id": "1", "name": "fox", "category": "5", "post_count": "10"}
+    ])).decode("utf-8") + "\n"
+    data = gzip.compress(raw.encode("utf-8"))
+    fake_transport.add_bytes("/db_export/tags-2026-05-16.csv.gz", data)
+
+    export = client.db_exports.tags("2026-05-16")
+    rows = list(export.rows())
+    assert [row["name"] for row in rows] == ["fox"]
+    assert [record.name for record in export.records()] == ["fox"]

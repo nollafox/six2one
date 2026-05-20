@@ -1,43 +1,68 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
+from ..config import StoreConfig
 from ..database import SQLite
-from .queue import QueueStore
-from .source_runs import SourceRunsStore
-from .posts import PostsStore
-from .enrichment import EnrichmentStore
-from .images import ImagesStore
-from .metadata import MetadataStore
-from .tags import TagsStore
+from ..models import CollectionKind
+from .collections import CollectionRepository
+from .files import FileRepository
+from .coverage import EnrichmentCoverageRepository
+from .imports import ImportRepository
+from .maintenance import MaintenanceRepository
+from .metadata import MetadataRepository
+from .posts import PostRepository
+from .queue import QueueRepository
+from .source_runs import SourceRunRepository
+from .tags import TagRepository
 
 
-class Storage:
-    """Facade for all storage stores."""
+class Store:
+    """Facade for the e621 SQLite store.
+
+    Repositories expose domain intent rather than physical table layout. The
+    store owns transaction boundaries and connection lifecycle.
+    """
 
     def __init__(self, database: SQLite) -> None:
         self.database = database
-        self.queue = QueueStore(database)
-        self.source_runs = SourceRunsStore(database)
-        self.posts = PostsStore(database)
-        self.enrichment = EnrichmentStore(database)
-        self.images = ImagesStore(database)
-        self.metadata = MetadataStore(database)
-        self.tags = TagsStore(database)
+        self.metadata = MetadataRepository(database)
+        self.runs = SourceRunRepository(database)
+        self.source_runs = self.runs
+        self.posts = PostRepository(database)
+        self.tags = TagRepository(database)
+        self.files = FileRepository(database)
+        self.pools = CollectionRepository(database, kind=CollectionKind.POOL)
+        self.sets = CollectionRepository(database, kind=CollectionKind.SET)
+        self.coverage = EnrichmentCoverageRepository(database)
+        self.queue = QueueRepository(database)
+        self.imports = ImportRepository(database)
+        self.maintenance = MaintenanceRepository(database)
 
     @classmethod
-    def open(cls, path: str | Path, *, read_only: bool = False) -> "Storage":
-        return cls(SQLite.connect(path, read_only=read_only))
+    def open(cls, config: StoreConfig | str | Path, *, read_only: bool | None = None) -> "Store":
+        return cls(SQLite.connect(config, read_only=read_only))
 
-    def transaction(self):
-        return self.database.transaction()
+    @contextmanager
+    def read(self) -> Iterator["Store"]:
+        with self.database.read_transaction():
+            yield self
+
+    @contextmanager
+    def write(self) -> Iterator["Store"]:
+        with self.database.write_transaction():
+            yield self
 
     def close(self) -> None:
         self.database.close()
 
-    def __enter__(self) -> "Storage":
+    def __enter__(self) -> "Store":
         return self
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+Storage = Store

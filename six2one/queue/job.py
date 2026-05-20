@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from six2one.storage.models import JobKind, SourceRunId
+
 
 @dataclass(frozen=True, slots=True)
 class NewJob:
     """A job requested by another job result."""
 
-    kind: str
+    kind: JobKind
     payload: Mapping[str, Any]
-    source_run_id: str | None = None
+    source_run_id: SourceRunId | None = None
     priority: int = 0
     max_attempts: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -40,7 +42,7 @@ class JobContext:
 class Job:
     """Base class for queue jobs."""
 
-    kind: str
+    kind: JobKind
     title: str
     description: str = ""
     max_attempts: int = 3

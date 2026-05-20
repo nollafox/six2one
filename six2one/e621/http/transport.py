@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -61,13 +62,48 @@ class Transport:
         If destination is a directory, the filename is derived from the URL.
         """
 
+        return self.download(url, destination)
+
+    def download(
+        self,
+        path_or_url: str,
+        destination: str | Path,
+        *,
+        params: Params | None = None,
+        progress: Any | None = None,
+        desc: str | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Path:
+        """Stream a response to disk, optionally updating a tqdm-style bar."""
+
         dest = Path(destination).expanduser()
         if dest.exists() and dest.is_dir():
-            filename = url.rstrip("/").split("/")[-1] or "download"
+            filename = path_or_url.rstrip("/").split("/")[-1] or "download"
             dest = dest / filename
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(self.get_bytes(url))
-        return dest
+
+        attempt = 0
+        while True:
+            try:
+                return self._download_once(
+                    path_or_url,
+                    dest,
+                    params=params,
+                    progress=progress,
+                    desc=desc,
+                    chunk_size=chunk_size,
+                )
+            except E621RateLimitError as error:
+                if not self.retry_policy.should_retry(error.status_code or 429, attempt):
+                    raise
+                attempt += 1
+                time.sleep(self.retry_policy.delay_for(attempt, error.retry_after))
+            except E621APIError as error:
+                status_code = error.status_code or 0
+                if not self.retry_policy.should_retry(status_code, attempt):
+                    raise
+                attempt += 1
+                time.sleep(self.retry_policy.delay_for(attempt))
 
     def request(
         self,
@@ -132,6 +168,57 @@ class Transport:
         except URLError as error:
             raise E621APIError(f"Network error contacting e621: {error}") from error
 
+    def _download_once(
+        self,
+        path_or_url: str,
+        destination: Path,
+        *,
+        params: Params | None,
+        progress: Any | None,
+        desc: str | None,
+        chunk_size: int,
+    ) -> Path:
+        self.rate_limiter.wait()
+
+        url = self._url(path_or_url, params=params)
+        request_headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "application/octet-stream, */*",
+        }
+        auth_header = basic_auth_header(self.auth)
+        if auth_header:
+            request_headers["Authorization"] = auth_header
+
+        request = Request(url, method="GET", headers=request_headers)
+        partial = destination.with_name(destination.name + ".part")
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                headers_dict = {key: value for key, value in response.headers.items()}
+                raise_for_status(ResponseInfo(response.status, headers_dict, b""))
+                total = _content_length(headers_dict)
+                bar = _progress_bar(progress, total=total, desc=desc or destination.name)
+                with bar if hasattr(bar, "__enter__") else nullcontext(bar) as live:
+                    with partial.open("wb") as handle:
+                        while True:
+                            chunk = response.read(chunk_size)
+                            if not chunk:
+                                break
+                            handle.write(chunk)
+                            if hasattr(live, "update"):
+                                live.update(len(chunk))
+                partial.replace(destination)
+                return destination
+        except HTTPError as error:
+            body = error.read()
+            headers_dict = {key: value for key, value in error.headers.items()}
+            raise_for_status(ResponseInfo(error.code, headers_dict, body))
+            raise AssertionError("unreachable")
+        except URLError as error:
+            raise E621APIError(f"Network error contacting e621: {error}") from error
+        finally:
+            if partial.exists():
+                partial.unlink()
+
     def _url(self, path_or_url: str, *, params: Params | None = None) -> str:
         if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
             base = path_or_url
@@ -157,3 +244,20 @@ class Transport:
 
         separator = "&" if "?" in base else "?"
         return base + separator + urlencode(clean)
+
+
+def _content_length(headers: dict[str, str]) -> int | None:
+    for key, value in headers.items():
+        if key.lower() != "content-length":
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _progress_bar(progress: Any | None, *, total: int | None, desc: str):
+    if progress is None:
+        return nullcontext()
+    return progress(total=total, unit="B", unit_scale=True, unit_divisor=1024, desc=desc)

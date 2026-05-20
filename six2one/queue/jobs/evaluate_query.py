@@ -4,14 +4,14 @@ from typing import Any, Mapping
 
 from ..job import Job, JobResult, NewJob
 from ..models import JobKind
-from six2one.query import E621QueryLanguage, filter_posts
-from six2one.storage.models import ImageVariant
+from six2one.query import E621QueryLanguage
+from six2one.storage.models import ImageVariant, SourceRunId
 
 
 class EvaluateQueryJob(Job):
     """Evaluate cached candidates and enqueue image downloads for matches."""
 
-    kind = JobKind.EVALUATE_QUERY.value
+    kind = JobKind.EVALUATE_QUERY
     title = "Evaluate query"
     max_attempts = 1
 
@@ -19,8 +19,8 @@ class EvaluateQueryJob(Job):
         data = dict(payload)
         data.setdefault("query", None)
         data.setdefault("download", False)
-        data.setdefault("image_variant", ImageVariant.ORIGINAL.value)
-        data["image_variant"] = ImageVariant(data["image_variant"]).value
+        data.setdefault("image_variant", ImageVariant.ORIGINAL.storage_name)
+        data["image_variant"] = _variant_from_value(data["image_variant"]).storage_name
         return data
 
     def run(
@@ -28,25 +28,25 @@ class EvaluateQueryJob(Job):
         context,
         *,
         query: str | None = None,
-        source_run_id: str | None = None,
+        source_run_id: int | None = None,
         post_ids: list[int] | None = None,
         destination: str | None = None,
         download: bool = False,
-        image_variant: str = ImageVariant.ORIGINAL.value,
+        image_variant: str = ImageVariant.ORIGINAL.storage_name,
         **_: Any,
     ) -> JobResult:
-        candidates = context.store.posts.all() if post_ids is None else context.store.posts.get_many(post_ids)
         if query is None and source_run_id:
-            run = context.store.source_runs.get(source_run_id)
-            query = None if run is None else run.query
+            run = context.store.source_runs.get(SourceRunId(int(source_run_id)))
+            query = run.query
         if not query:
             raise ValueError("evaluate_query requires query or source_run_id with stored query")
         language = context.query_language or E621QueryLanguage(tag_database=getattr(context.store, "tags", None))
         compiled = language.compile(query)
         data = StorageQueryData(context.store)
-        matches = filter_posts(compiled, candidates, data=data)
+        candidate_count = context.store.posts.count() if post_ids is None else len(tuple(post_ids))
+        matches = context.store.posts.matching(compiled, ids=post_ids, data=data)
 
-        variant = ImageVariant(image_variant)
+        variant = _variant_from_value(image_variant)
         enqueue: list[NewJob] = []
         if download:
             image_root = destination or getattr(context.settings, "images_dir", ".")
@@ -55,36 +55,24 @@ class EvaluateQueryJob(Job):
                 if image is None:
                     continue
 
-                target = context.store.images.path_for(
+                target = context.store.files.path_for(
                     image_root,
-                    post_id=post.id,
+                    post_id=int(post.id),
                     variant=variant,
                     file_ext=image["file_ext"],
                 )
 
-                # Skip already-downloaded variants. The image store is the source
-                # of truth for the local path and variant state.
-                if context.store.images.exists(post.id, variant.value):
+                if context.store.files.exists(int(post.id), variant):
                     continue
 
-                context.store.images.enqueue(
-                    post.id,
-                    image["source_url"],
-                    variant=variant,
-                    local_path=target,
-                    file_ext=image.get("file_ext"),
-                    width=image.get("width"),
-                    height=image.get("height"),
-                    size_bytes=image.get("size_bytes"),
-                    md5=image.get("md5"),
-                )
+                context.store.files.mark_pending(int(post.id), variant, local_path=target)
 
                 enqueue.append(
                     NewJob(
-                        JobKind.DOWNLOAD_IMAGE.value,
+                        _download_job_kind(variant),
                         {
-                            "post_id": post.id,
-                            "variant": variant.value,
+                            "post_id": int(post.id),
+                            "variant": variant.storage_name,
                             "source_url": image["source_url"],
                             "destination": str(target),
                             "file_ext": image.get("file_ext"),
@@ -94,21 +82,21 @@ class EvaluateQueryJob(Job):
                             "md5": image.get("md5"),
                             "expected_md5": image.get("md5"),
                         },
-                        source_run_id=source_run_id,
+                        source_run_id=SourceRunId(int(source_run_id)) if source_run_id is not None else None,
                     )
                 )
 
         if source_run_id:
             context.store.source_runs.update_state(
-                source_run_id,
+                SourceRunId(int(source_run_id)),
                 "evaluated",
-                total_candidates=len(candidates),
+                total_candidates=candidate_count,
                 total_matches=len(matches),
             )
 
         return JobResult(
-            message=f"Evaluated {len(candidates)} candidates; matched {len(matches)}",
-            metadata={"candidates": len(candidates), "matches": len(matches), "download_jobs": len(enqueue)},
+            message=f"Evaluated {candidate_count} candidates; matched {len(matches)}",
+            metadata={"candidates": candidate_count, "matches": len(matches), "download_jobs": len(enqueue)},
             enqueue=tuple(enqueue),
         )
 
@@ -135,6 +123,7 @@ class StorageQueryData:
     def favorites_for(self, post_id: int): return self._rows("favorites", "for_post", post_id)
     def votes_for(self, post_id: int): return self._rows("post_votes", "for_post", post_id)
     def approvals_for(self, post_id: int): return self._rows("post_approvals", "for_post", post_id)
+    def pools_for(self, post_id: int): return self._rows("pools", "for_post", post_id)
     def sets_for(self, post_id: int): return self._rows("sets", "for_post", post_id)
     def replacements_for(self, post_id: int): return self._rows("post_replacements", "for_post", post_id)
     def deletion_events_for(self, post_id: int):
@@ -174,7 +163,7 @@ def _variant_payload(raw: Mapping[str, Any], variant: ImageVariant) -> dict[str,
             "md5": file_data.get("md5"),
         }
 
-    data = raw.get(variant.value) or {}
+    data = raw.get(variant.storage_name) or {}
     url = data.get("url")
     if not url:
         return None
@@ -194,3 +183,26 @@ def _ext_from_url(url: str) -> str | None:
     if "." not in filename:
         return None
     return filename.rsplit(".", 1)[-1]
+
+
+def _variant_from_value(value: object) -> ImageVariant:
+    if isinstance(value, ImageVariant):
+        return value
+    if isinstance(value, str):
+        variants = {
+            ImageVariant.ORIGINAL.storage_name: ImageVariant.ORIGINAL,
+            ImageVariant.SAMPLE.storage_name: ImageVariant.SAMPLE,
+            ImageVariant.PREVIEW.storage_name: ImageVariant.PREVIEW,
+        }
+        normalized = value.strip().lower()
+        if normalized in variants:
+            return variants[normalized]
+    raise ValueError(f"Unsupported image variant: {value!r}")
+
+
+def _download_job_kind(variant: ImageVariant) -> JobKind:
+    return {
+        ImageVariant.ORIGINAL: JobKind.DOWNLOAD_ORIGINAL,
+        ImageVariant.SAMPLE: JobKind.DOWNLOAD_SAMPLE,
+        ImageVariant.PREVIEW: JobKind.DOWNLOAD_PREVIEW,
+    }[variant]

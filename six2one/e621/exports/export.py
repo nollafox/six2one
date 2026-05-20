@@ -29,7 +29,7 @@ class Export:
     def api_path(self) -> str:
         return endpoints.DB_EXPORT_FILE.format(kind=self.kind, date=self.date)
 
-    def download(self, destination: str | Path) -> Path:
+    def download(self, destination: str | Path, *, progress: object | None = None) -> Path:
         """Download the export file and return its local path."""
 
         dest = Path(destination).expanduser()
@@ -39,8 +39,12 @@ class Export:
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
 
-        data = self.client.transport.get_bytes(self.api_path)  # type: ignore[attr-defined]
-        dest.write_bytes(data)
+        transport = self.client.transport  # type: ignore[attr-defined]
+        if hasattr(transport, "download"):
+            transport.download(self.api_path, dest, progress=progress, desc=f"Downloading {self.filename}")
+        else:
+            data = transport.get_bytes(self.api_path)
+            dest.write_bytes(data)
         self.path = dest
         return dest
 
@@ -51,7 +55,10 @@ class Export:
         with gzip.open(path, "rt", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                yield dict(row)
+                data = dict(row)
+                if all(value is None or str(value).strip() == "" for value in data.values()):
+                    continue
+                yield data
 
     def records(self) -> Iterator[ExportRecord]:
         """Stream typed export records."""

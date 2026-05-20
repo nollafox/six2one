@@ -1,215 +1,104 @@
 from __future__ import annotations
 
+import re
 import sqlite3
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from enum import IntEnum
-from typing import Literal
 
-from ..database.model import Model
-
-WildcardOrder = Literal["post_count", "name"]
-VALID_IMPLICATION_STATUSES = frozenset({"active", "deleted", "pending", "rejected"})
+from .enums import AliasStatus, TagCategory
+from .ids import TagId, UserId
 
 
-class TagCategory(IntEnum):
-    GENERAL = 0
-    ARTIST = 1
-    CONTRIBUTOR = 2
-    COPYRIGHT = 3
-    CHARACTER = 4
-    SPECIES = 5
-    INVALID = 6
-    META = 7
-    LORE = 8
-    UNKNOWN = -1
-
-    @property
-    def label(self) -> str:
-        return CATEGORY_LABELS[self]
-
-    @classmethod
-    def from_e621(cls, value: int | str | None) -> "TagCategory":
-        if value is None or value == "":
-            return cls.UNKNOWN
-        try:
-            return cls(int(value))
-        except (TypeError, ValueError):
-            return cls.UNKNOWN
+_TAG_SPACE = re.compile(r"\s+")
 
 
-CATEGORY_LABELS = {
-    TagCategory.GENERAL: "general",
-    TagCategory.ARTIST: "artist",
-    TagCategory.CONTRIBUTOR: "contributor",
-    TagCategory.COPYRIGHT: "copyright",
-    TagCategory.CHARACTER: "character",
-    TagCategory.SPECIES: "species",
-    TagCategory.INVALID: "invalid",
-    TagCategory.META: "meta",
-    TagCategory.LORE: "lore",
-    TagCategory.UNKNOWN: "unknown",
-}
-
-
-def normalize_tag_name(value: str) -> str:
-    return str(value or "").strip().replace(" ", "_").lower()
-
-
-def normalize_implication_status(value: str | None) -> str:
-    normalized = str(value or "active").strip().lower()
-    return normalized if normalized in VALID_IMPLICATION_STATUSES else "active"
+def normalize_tag_name(name: str) -> str:
+    normalized = _TAG_SPACE.sub("_", name.strip().lower())
+    if not normalized:
+        raise ValueError("tag name must not be empty")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
-class Tag(Model):
+class Tag:
     table_name = "tags"
 
-    id: int
+    id: TagId
     name: str
+    normalized_name: str
     category: TagCategory
-    post_count: int | None = None
-    is_deprecated: bool | None = None
-    created_at: str | None = None
-    updated_at: str | None = None
+    post_count: int
+    flags: int
+    created_ms: int | None
+    updated_ms: int | None
+    cached_ms: int
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Tag":
-        deprecated = row["is_deprecated"] if "is_deprecated" in row.keys() else None
         return cls(
-            id=int(row["id"]),
+            id=TagId(int(row["tag_id"])),
             name=str(row["name"]),
-            category=TagCategory.from_e621(row["category"]),
-            post_count=int(row["post_count"]) if row["post_count"] is not None else None,
-            created_at=str(row["created_at"]) if row["created_at"] is not None else None,
-            updated_at=str(row["updated_at"]) if row["updated_at"] is not None else None,
-            is_deprecated=bool(deprecated) if deprecated is not None else None,
+            normalized_name=str(row["normalized_name"]),
+            category=TagCategory(int(row["category_id"])),
+            post_count=int(row["post_count"]),
+            flags=int(row["flags"]),
+            created_ms=_optional_int(row["created_ms"]),
+            updated_ms=_optional_int(row["updated_ms"]),
+            cached_ms=int(row["cached_ms"]),
         )
 
     @property
     def category_name(self) -> str:
-        return self.category.label
+        return self.category.name.lower()
 
 
 @dataclass(frozen=True, slots=True)
-class TagAlias(Model):
-    table_name = "tag_aliases"
-
-    id: int
-    antecedent_name: str
-    consequent_name: str
-    antecedent_normalized: str
-    consequent_normalized: str
-    status: str
-    created_at: str | None = None
-    updated_at: str | None = None
-
-    @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "TagAlias":
-        return cls(
-            id=int(row["id"]),
-            antecedent_name=str(row["antecedent_name"]),
-            consequent_name=str(row["consequent_name"]),
-            antecedent_normalized=str(row["antecedent_normalized"]),
-            consequent_normalized=str(row["consequent_normalized"]),
-            status=str(row["status"]),
-            created_at=str(row["created_at"]) if row["created_at"] is not None else None,
-            updated_at=str(row["updated_at"]) if row["updated_at"] is not None else None,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class TagSet:
-    root: str | None
-    tags: tuple[Tag, ...]
-    source: str
-
-    @property
-    def ids(self) -> tuple[int, ...]:
-        return tuple(tag.id for tag in self.tags)
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        return tuple(tag.name for tag in self.tags)
-
-    @property
-    def size(self) -> int:
-        return len(self.tags)
-
-    @classmethod
-    def empty(cls, *, root: str | None = None, source: str = "empty") -> "TagSet":
-        return cls(root=root, tags=(), source=source)
-
-    @classmethod
-    def of(cls, tags: Iterable[Tag], *, root: str | None, source: str) -> "TagSet":
-        seen: set[int] = set()
-        unique: list[Tag] = []
-        for tag in tags:
-            if tag.id in seen:
-                continue
-            seen.add(tag.id)
-            unique.append(tag)
-        return cls(root=root, tags=tuple(unique), source=source)
-
-    @classmethod
-    def union(cls, *sets: "TagSet", root: str | None, source: str) -> "TagSet":
-        return cls.of((tag for tag_set in sets for tag in tag_set.tags), root=root, source=source)
+class TagAlias:
+    antecedent_tag_id: TagId
+    consequent_tag_id: TagId
+    status: AliasStatus
+    created_ms: int | None
+    updated_ms: int | None
+    creator_id: UserId | None
+    approver_id: UserId | None
+    reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class TagResolution:
-    raw: str
-    canonical_name: str
-    found: bool
+    requested: str
     tag: Tag | None
-    implies: TagSet
-    implied_by: TagSet
-    match: TagSet
-    exclude: TagSet
+    found: bool = False
     alias_applied: bool = False
     alias_from: str | None = None
     alias_to: str | None = None
-    diagnostics: tuple[str, ...] = ()
+    aliases_followed: tuple[Tag, ...] = ()
+    implies: "TagNameSet" = None  # type: ignore[assignment]
+    implied_by: "TagNameSet" = None  # type: ignore[assignment]
+    match: "TagNameSet" = None  # type: ignore[assignment]
+    exclude: "TagNameSet" = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        empty = TagNameSet(())
+        if self.implies is None:
+            object.__setattr__(self, "implies", empty)
+        if self.implied_by is None:
+            object.__setattr__(self, "implied_by", empty)
+        if self.match is None:
+            object.__setattr__(self, "match", empty)
+        if self.exclude is None:
+            object.__setattr__(self, "exclude", self.match or empty)
+
+    @property
+    def canonical_name(self) -> str:
+        return self.tag.name if self.tag is not None else self.requested
 
 
 @dataclass(frozen=True, slots=True)
-class WildcardExpansion:
-    raw_pattern: str
-    normalized_pattern: str
-    matches: TagSet
-    limit: int
-    truncated: bool
-    ordered_by: WildcardOrder
+class TagNameSet:
+    names: tuple[str, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class TagImportResult:
-    snapshot: str
-    export_date: str
-    tags_count: int
-    aliases_count: int
-    implications_count: int
-    closure_count: int
-    unresolved_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class TagDatabaseStatus:
-    ready: bool
-    schema_version: int | None
-    tags_count: int
-    aliases_count: int
-    implications_count: int
-    closure_count: int
-    unresolved_count: int
-    diagnostics: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class UnresolvedImplication:
-    id: int
-    antecedent_name: str | None
-    consequent_name: str | None
-    status: str | None
-    created_at: str | None = None
-    updated_at: str | None = None
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)

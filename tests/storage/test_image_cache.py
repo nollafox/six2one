@@ -1,55 +1,67 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
-from six2one.storage.models import ImageState
-from six2one.storage.stores.images import ImagesStore
-from tests.support import make_post
+from six2one.storage.models import DownloadState, ImageVariant
+from tests.factories import post_payload
 
 
-def test_image_path_uses_zero_padded_post_id():
-    path = ImagesStore.path_for("/cache/images", post_id=6407238, variant="original", file_ext="png")
+def test_file_path_uses_zero_padded_post_id(store, tmp_path):
+    path = store.files.path_for(
+        tmp_path / "images",
+        post_id=6407238,
+        variant=ImageVariant.ORIGINAL,
+        file_ext="png",
+    )
 
-    assert path == Path("/cache/images/000006407238/original.png")
-
-
-def test_images_are_keyed_by_post_id_and_variant(store, tmp_path):
-    store.posts.upsert(make_post(6407238))
-    store.images.enqueue(6407238, "https://static.example/original.png", variant="original", local_path=tmp_path / "original.png", file_ext="png")
-    store.images.enqueue(6407238, "https://static.example/sample.jpg", variant="sample", local_path=tmp_path / "sample.jpg", file_ext="jpg")
-
-    images = store.images.for_post(6407238)
-
-    assert {image.variant.value for image in images} == {"original", "sample"}
-    assert len(images) == 2
+    assert path == tmp_path / "images" / "000006407238" / "original.png"
 
 
-def test_same_post_same_variant_upsert_is_idempotent(store, tmp_path):
-    store.posts.upsert(make_post(1))
-    first = store.images.enqueue(1, "https://static.example/old.png", variant="original", local_path=tmp_path / "old.png", file_ext="png")
-    second = store.images.enqueue(1, "https://static.example/new.png", variant="original", local_path=tmp_path / "new.png", file_ext="png")
+def test_imported_files_are_keyed_by_post_id_and_variant(store):
+    store.imports.import_posts([post_payload(6407238)])
 
-    images = store.images.list()
+    files = store.files.for_post(6407238)
 
-    assert first.post_id == second.post_id == 1
-    assert len(images) == 1
-    assert images[0].source_url == "https://static.example/new.png"
+    assert {file.variant for file in files} == {
+        ImageVariant.ORIGINAL,
+        ImageVariant.SAMPLE,
+        ImageVariant.PREVIEW,
+    }
+    assert len(files) == 3
 
 
-def test_downloaded_image_record_preserves_cache_metadata(store, tmp_path):
+def test_reimport_same_post_variant_is_idempotent(store):
+    first = post_payload(1)
+    second = post_payload(1, sample_url="https://static.example/new-sample.jpg")
+
+    first_report = store.imports.import_posts([first])
+    second_report = store.imports.import_posts([second])
+
+    files = store.files.for_post(1)
+    sample = store.files.get(1, ImageVariant.SAMPLE)
+    assert first_report.accepted == 1
+    assert second_report.accepted == 1
+    assert len(files) == 3
+    assert sample.source_url == "https://static.example/new-sample.jpg"
+
+
+def test_downloaded_file_record_preserves_cache_metadata(store, tmp_path):
+    store.imports.import_posts([post_payload(1)])
     path = tmp_path / "images" / "000000000001" / "original.png"
-    store.posts.upsert(make_post(1))
-    store.images.enqueue(1, "https://static.example/1.png", variant="original", local_path=path, file_ext="png", width=400, height=300, size_bytes=12, md5="abc")
 
-    store.images.mark_downloaded(1, variant="original", local_path=path, bytes_written=12, checksum="sha256:abc")
-    record = store.images.get(1, "original")
+    store.files.mark_pending(1, ImageVariant.ORIGINAL, local_path=path)
+    store.files.mark_downloaded(
+        1,
+        ImageVariant.ORIGINAL,
+        local_path=path,
+        bytes_written=12,
+        checksum=bytes.fromhex("00" * 16),
+        downloaded_at=datetime.now(timezone.utc),
+    )
+    record = store.files.get(1, ImageVariant.ORIGINAL)
 
-    assert record.state is ImageState.DOWNLOADED
-    assert record.local_path == str(path)
-    assert record.file_ext == "png"
-    assert record.width == 400
-    assert record.height == 300
-    assert record.size_bytes == 12
-    assert record.md5 == "abc"
+    assert record.download_state is DownloadState.DOWNLOADED
+    assert record.local_path == path
     assert record.bytes_written == 12
-    assert record.checksum == "sha256:abc"
+    assert record.checksum == bytes.fromhex("00" * 16)

@@ -8,7 +8,7 @@ from ..models import JobKind
 
 
 class EnrichNoteVersionsJob(Job):
-    kind = JobKind.ENRICH_NOTE_VERSIONS.value
+    kind = JobKind.ENRICH_NOTE_VERSIONS
     title = "Enrich note versions"
 
     def validate_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:

@@ -67,7 +67,12 @@ def format_fetch_queue_result(result: FetchQueueResult) -> str:
     """Format `621 fetch --queue` output."""
 
     dl = result.download
-    title = "six2one fetch --queue --retry-failed" if result.retry_failed else "six2one fetch --queue"
+    suffix = []
+    if result.retry_failed:
+        suffix.append("--retry-failed")
+    if result.watch:
+        suffix.append("--watch")
+    title = "six2one fetch --queue" + (f" {' '.join(suffix)}" if suffix else "")
     lines = [
         title,
         "",
@@ -77,6 +82,8 @@ def format_fetch_queue_result(result: FetchQueueResult) -> str:
         _field("Failed image jobs", _n(result.failed_image_jobs)),
         "",
     ]
+    if result.watch:
+        lines.extend(["Worker", _field("Mode", "watching for new queue work"), _field("Idle polls", _n(result.idle_polls)), ""])
     if result.retry_failed:
         lines.extend(["Retry", _field("Failed jobs restored", _n(result.failed_jobs_restored)), ""])
     lines.extend([
@@ -90,7 +97,7 @@ def format_fetch_queue_result(result: FetchQueueResult) -> str:
         _field("Skipped existing files", _n(dl.skipped_existing_files)),
         _field("Written", dl.written),
         "",
-        "Paused after error." if result.paused_after_error else "Done.",
+        _completion_line(result),
         "",
         "Summary",
     ])
@@ -109,3 +116,13 @@ def format_fetch_queue_result(result: FetchQueueResult) -> str:
         lines.extend(["", "  Retry failed jobs:", "    621 fetch --queue --retry-failed"])
     lines.extend(["", "  Remove failed jobs:", "    621 queue clear --failed"])
     return "\n".join(lines)
+
+
+def _completion_line(result: FetchQueueResult) -> str:
+    if result.interrupted:
+        return "Stopped by user."
+    if result.paused_after_error:
+        return "Paused after error."
+    if result.watch:
+        return "Worker stopped."
+    return "Done."

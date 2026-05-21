@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from six2one._commands.export.command import ExportResult
-from six2one._commands.fetch.command import FetchCommandResult, FetchDiscoverySummary, FetchDownloadSummary
+from six2one._commands.fetch.command import FetchCommandResult, FetchDiscoverySummary, FetchDownloadSummary, FetchQueueResult
 from six2one._commands.mirror.command import MirrorResult
 from six2one._commands.queue.command import QueueAmendResult, QueueCommandResult, QueueRunSummary
 from six2one.cli import main
@@ -41,6 +41,7 @@ def test_fetch_help_keeps_limit_and_removes_legacy_options():
     assert "--file-type" in result.stdout
     assert "default: original" in result.stdout
     assert "--queue" in result.stdout
+    assert "--watch" in result.stdout
     assert '621 export "dragon rating:s" -o ./dragon-export' in result.stdout
     assert "After fetch completes, use export" in result.stdout
     assert "--size" not in result.stdout
@@ -140,6 +141,25 @@ def test_fetch_zero_limit_is_preserved_as_zero():
 
     assert result.exit_code == 0
     assert run.call_args.kwargs["limit"] == 0
+
+
+def test_fetch_queue_watch_dispatches_worker_mode():
+    with patch("six2one.cli.run_fetch_queue", return_value=_fetch_queue_result(watch=True)) as run:
+        result = _run_cli("fetch", "--queue", "--watch")
+
+    assert result.exit_code == 0
+    run.assert_called_once()
+    assert run.call_args.kwargs["watch"] is True
+    assert "Watching for queued work" in result.stdout
+    assert "six2one fetch --queue --watch" in result.stdout
+    assert result.stderr == ""
+
+
+def test_fetch_watch_requires_queue_mode():
+    result = _run_cli("fetch", "dragon", "--watch")
+
+    assert result.exit_code == 1
+    assert "--watch can only be used with --queue" in result.stderr
 
 
 def test_queue_zero_limit_is_preserved_as_zero():
@@ -288,6 +308,10 @@ def _fetch_result() -> FetchCommandResult:
         download=FetchDownloadSummary(downloaded=1, total=1, written="1 KB"),
         image_variant="sample",
     )
+
+
+def _fetch_queue_result(*, watch: bool = False) -> FetchQueueResult:
+    return FetchQueueResult(watch=watch)
 
 
 def _queue_result(*, new_image_jobs: int = 1) -> QueueCommandResult:

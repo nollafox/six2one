@@ -8,6 +8,7 @@ unless retry is explicit.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 from typing import Any
 
 from six2one.e621 import E621Client
@@ -66,12 +67,16 @@ class FetchQueueResult:
     """Result returned by `621 fetch --queue`."""
 
     retry_failed: bool = False
+    watch: bool = False
     active_source_runs: int = 0
     pending_image_jobs: int = 0
     failed_image_jobs: int = 0
     failed_jobs_restored: int = 0
     download: FetchDownloadSummary = field(default_factory=FetchDownloadSummary)
     paused_after_error: bool = False
+    interrupted: bool = False
+    idle_polls: int = 0
+    attempted_jobs: int = 0
 
 
 def _from_queue_result(queued: QueueCommandResult, *, download: FetchDownloadSummary, completed: bool) -> FetchCommandResult:
@@ -153,26 +158,37 @@ def run_fetch_queue(
     config: SixTwoOneConfig,
     *,
     retry_failed: bool = False,
+    watch: bool = False,
     e621: Any | None = None,
     backend: Any | None = None,
+    poll_interval_seconds: float = 2.0,
+    max_idle_polls: int | None = None,
 ) -> FetchQueueResult:
     """Drain already queued image jobs.
 
     Failed jobs are retried only when ``retry_failed`` is true.
+    When ``watch`` is true, keep polling for newly queued work until interrupted.
     """
 
     if backend is not None and hasattr(backend, "fetch_queue"):
-        return backend.fetch_queue(config, retry_failed=retry_failed)
+        return backend.fetch_queue(config, retry_failed=retry_failed, watch=watch)
 
     client = e621 or _create_e621_client(config)
     with open_storage(config.storage_path) as storage:
-        active_runs = _active_source_runs(storage)
-        pending = _pending_image_jobs(storage, source_run_id=None)
-        failed = _failed_image_jobs(storage, source_run_id=None)
-        summary = run_jobs(storage=storage, e621=client, retry_failed=retry_failed, image_only=False, settings=config)
+        active_runs, pending, failed = _queue_counts(storage)
+        summary = _drain_queue(
+            storage=storage,
+            client=client,
+            config=config,
+            retry_failed=retry_failed,
+            watch=watch,
+            poll_interval_seconds=poll_interval_seconds,
+            max_idle_polls=max_idle_polls,
+        )
 
     return FetchQueueResult(
         retry_failed=retry_failed,
+        watch=watch,
         active_source_runs=active_runs,
         pending_image_jobs=pending,
         failed_image_jobs=max(0, failed - summary.restored_failed_jobs + summary.failed_image_jobs),
@@ -186,6 +202,81 @@ def run_fetch_queue(
             written=human_bytes(summary.bytes_written),
         ),
         paused_after_error=summary.paused_after_error,
+        interrupted=summary.interrupted,
+        idle_polls=summary.idle_polls,
+        attempted_jobs=summary.attempted_jobs,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _QueueDrainSummary:
+    downloaded_images: int = 0
+    failed_image_jobs: int = 0
+    skipped_existing_files: int = 0
+    bytes_written: int = 0
+    paused_after_error: bool = False
+    restored_failed_jobs: int = 0
+    attempted_jobs: int = 0
+    interrupted: bool = False
+    idle_polls: int = 0
+
+
+def _drain_queue(
+    *,
+    storage,
+    client: Any,
+    config: SixTwoOneConfig,
+    retry_failed: bool,
+    watch: bool,
+    poll_interval_seconds: float,
+    max_idle_polls: int | None,
+) -> _QueueDrainSummary:
+    totals = {
+        "downloaded_images": 0,
+        "failed_image_jobs": 0,
+        "skipped_existing_files": 0,
+        "bytes_written": 0,
+        "restored_failed_jobs": 0,
+        "attempted_jobs": 0,
+    }
+    paused_after_error = False
+    idle_polls = 0
+    interrupted = False
+
+    try:
+        while True:
+            summary = run_jobs(storage=storage, e621=client, retry_failed=retry_failed, image_only=False, settings=config)
+            totals["downloaded_images"] += summary.downloaded_images
+            totals["failed_image_jobs"] += summary.failed_image_jobs
+            totals["skipped_existing_files"] += summary.skipped_existing_files
+            totals["bytes_written"] += summary.bytes_written
+            totals["restored_failed_jobs"] += summary.restored_failed_jobs
+            totals["attempted_jobs"] += summary.attempted_jobs
+            paused_after_error = paused_after_error or summary.paused_after_error
+
+            if not watch:
+                break
+            if summary.attempted_jobs:
+                idle_polls = 0
+                continue
+
+            idle_polls += 1
+            if max_idle_polls is not None and idle_polls >= max_idle_polls:
+                break
+            time.sleep(max(0.0, poll_interval_seconds))
+    except KeyboardInterrupt:
+        interrupted = True
+
+    return _QueueDrainSummary(
+        downloaded_images=totals["downloaded_images"],
+        failed_image_jobs=totals["failed_image_jobs"],
+        skipped_existing_files=totals["skipped_existing_files"],
+        bytes_written=totals["bytes_written"],
+        paused_after_error=paused_after_error,
+        restored_failed_jobs=totals["restored_failed_jobs"],
+        attempted_jobs=totals["attempted_jobs"],
+        interrupted=interrupted,
+        idle_polls=idle_polls,
     )
 
 
@@ -212,3 +303,11 @@ def _failed_image_jobs(storage, *, source_run_id: str | None) -> int:
 def _active_source_runs(storage) -> int:
     jobs = storage.queue.list(states=(JobState.READY, JobState.LEASED, JobState.FAILED))
     return len({job.source_run_id for job in jobs if job.source_run_id})
+
+
+def _queue_counts(storage) -> tuple[int, int, int]:
+    return (
+        _active_source_runs(storage),
+        _pending_image_jobs(storage, source_run_id=None),
+        _failed_image_jobs(storage, source_run_id=None),
+    )

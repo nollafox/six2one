@@ -115,7 +115,7 @@ six2one keeps a canonical SQLite cache and a rebuildable search index side by si
 
 That split is what makes the workflow feel local-first without becoming fragile. A query is parsed and bound with e621-compatible semantics, including aliases and implications, then evaluated against the local index whenever the needed data is already present. If a query needs more data, such as comments, notes, pools, sets, favorites, votes, or moderation metadata, six2one queues the missing enrichment, stores it in SQLite, updates coverage, and reuses it the next time.
 
-Broad fetches fill the archive, narrower queries carve it, and exports turn matching downloaded posts into portable folders. Interrupted work is safe to resume because fetches run through the internal queue; downloaded images are keyed by post ID and variant rather than by query spelling, so aliases and overlapping searches converge on the same cached files.
+Broad fetches fill the archive, narrower queries carve it, and exports turn matching downloaded posts into portable folders. Interrupted work is safe to resume because fetches run through the internal queue; `fetch --queue` drains queued work once, while `fetch --queue --watch` keeps a worker alive for new jobs. Downloaded images are keyed by post ID and variant rather than by query spelling, so aliases and overlapping searches converge on the same cached files.
 
 <p align="center">
   <img src="https://github.com/nollafox/six2one/raw/main/docs/flowchart.png" alt="six2one flowchart" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12); max-width: 100%; height: auto;">
@@ -131,7 +131,8 @@ query
   → update the local search index
   → fetch missing enrichment
   → evaluate the query locally
-  → queue and download images
+  → queue image downloads
+  → drain once with fetch --queue, or keep a worker alive with fetch --queue --watch
   → export semantic subsets
 ```
 
@@ -255,6 +256,9 @@ Queued.
 Next
   Download queued images:
     621 fetch --queue
+
+  Keep processing future queued work:
+    621 fetch --queue --watch
 ```
 
 Inspect and manage queued work:
@@ -289,6 +293,14 @@ $ 621 queue clear "young"
 $ 621 queue amend q_01HXW6T2KZ9A --exclude "canine -paws"
 $ 621 fetch --queue
 ```
+
+For a background terminal, use worker mode instead:
+
+```bash
+$ 621 fetch --queue --watch
+```
+
+Worker mode keeps polling the durable queue and processes new jobs as they arrive. Stop it with Ctrl-C. Failed jobs are still left in the queue for inspection unless you explicitly run with `--retry-failed`.
 
 ### Fetch
 
@@ -329,12 +341,16 @@ $ 621 fetch "dragon rating:s" --file-type sample
 $ 621 fetch "dragon rating:s" --file-type preview
 ```
 
-Run already-queued work with `--queue`, and retry failed jobs with `--retry-failed`. Failed jobs are kept for inspection until you retry or clear them.
+Run already-queued work once with `--queue`, keep a worker alive with `--queue --watch`, and retry failed jobs with `--retry-failed`. Failed jobs are kept for inspection until you retry or clear them.
 
 ```bash
 $ 621 fetch --queue
+$ 621 fetch --queue --watch
 $ 621 fetch --queue --retry-failed
+$ 621 fetch --queue --watch --retry-failed
 ```
+
+Use the one-shot drain when you want a command to finish after the queue is empty. Use watch mode when another shell, script, or scheduled task may continue adding work with `621 queue ...`.
 
 ### Export
 

@@ -76,6 +76,7 @@ Examples:
   {prog} fetch "dragon rating:s" --limit 10
   {prog} export "dragon rating:s" -o ./dragon-export
   {prog} fetch --queue
+  {prog} fetch --queue --watch
 """
 FETCH_DESCRIPTION = """
 Discover posts for an e621 query, cache post JSON, enqueue needed enrichment and
@@ -87,6 +88,7 @@ Examples:
   {prog} export "dragon rating:s" -o ./dragon-export
   {prog} fetch --queue
   {prog} fetch --queue --retry-failed
+  {prog} fetch --queue --watch
 
 Notes:
   Results are stored in ~/.six2one/cache/six2one.sqlite and images are written
@@ -233,6 +235,11 @@ def build_parser(prog: str = "621", default_site: Site = Site.E621) -> argparse.
         action="store_true",
         help="with --queue, retry failed image jobs as well as pending jobs",
     )
+    fetch_parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="with --queue, keep running as a worker and process new jobs as they arrive",
+    )
 
     export_parser = subparsers.add_parser(
         EXPORT_COMMAND,
@@ -360,10 +367,15 @@ def _run_fetch_command(namespace: argparse.Namespace) -> int:
     config = SixTwoOneConfig.from_args(namespace)
     if namespace.retry_failed and not namespace.queue:
         raise CommandError("--retry-failed can only be used with --queue")
+    if namespace.watch and not namespace.queue:
+        raise CommandError("--watch can only be used with --queue")
     if namespace.queue:
         if namespace.query:
             raise CommandError("fetch --queue does not take a query")
-        result = run_fetch_queue(config, retry_failed=namespace.retry_failed)
+        if namespace.watch:
+            sys.stdout.write("six2one fetch --queue --watch\n\nWatching for queued work. Press Ctrl-C to stop.\n\n")
+            sys.stdout.flush()
+        result = run_fetch_queue(config, retry_failed=namespace.retry_failed, watch=namespace.watch)
         sys.stdout.write(format_fetch_queue_result(result) + "\n")
         return 0
 

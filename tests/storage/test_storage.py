@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import gzip
 from datetime import timedelta
+from pathlib import Path
 
 from six2one.query import E621QueryLanguage
 from six2one.storage import create_storage, validate_storage
@@ -28,11 +31,12 @@ def test_source_runs_and_posts_are_persisted(store):
 
     post = store.posts.get(101, load=PostLoad.full())
 
+    language = E621QueryLanguage(tag_database=store.tags)
     assert isinstance(run.id, int)
     assert report.accepted == 1
     assert post.id == 101
     assert post.rating is Rating.SAFE
-    assert store.posts.query().tag("fox").limit(10).ids() == (101,)
+    assert store.posts.search(language.compile("fox")).ids() == (101,)
 
 
 def test_cached_post_tags_are_stored_once_by_normalized_e621_name(store):
@@ -58,13 +62,14 @@ def test_post_import_preserves_indexes_and_is_idempotent(store):
     first = store.imports.import_posts(posts)
     second = store.imports.import_posts(posts)
 
+    language = E621QueryLanguage(tag_database=store.tags)
     assert first.accepted == 2
     assert second.accepted == 2
-    assert store.posts.query().tag("domestic_cat").limit(10).ids() == (201,)
-    assert store.posts.query().tag("wolf").limit(10).ids() == (202,)
+    assert store.posts.search(language.compile("domestic_cat")).ids() == (201,)
+    assert store.posts.search(language.compile("wolf")).ids() == (202,)
 
 
-def test_matching_uses_semantic_tags_with_explicit_candidates(store):
+def test_search_uses_semantic_tags_with_indexed_candidates(store):
     store.tags.import_exports(
         tags=[
             {"id": 1, "name": "canine", "category": 5},
@@ -85,13 +90,13 @@ def test_matching_uses_semantic_tags_with_explicit_candidates(store):
         post_payload(303, tag="dragon"),
     ])
     language = E621QueryLanguage(tag_database=store.tags)
-    candidates = store.posts.query().limit(10).allow_table_scan(reason="bounded test candidate set").ids()
+    candidates = {int(post_id) for post_id in store.posts.list_ids()}
 
-    canine = store.posts.matching(language.compile("canine rating:s"), ids=candidates)
-    dog = store.posts.matching(language.compile("dog rating:s"), ids=candidates)
+    canine = {int(post_id) for post_id in store.posts.search(language.compile("canine rating:s")).ids()} & candidates
+    dog = {int(post_id) for post_id in store.posts.search(language.compile("dog rating:s")).ids()} & candidates
 
-    assert {post.id for post in canine} == {301, 302}
-    assert {post.id for post in dog} == {302}
+    assert canine == {301, 302}
+    assert dog == {302}
 
 
 def test_enrichment_coverage_tracks_missing_and_ready_dependencies(store):
@@ -138,3 +143,85 @@ def test_source_run_update_state_is_typed(store):
 
     assert updated.state_id == 2
     assert updated.total_candidates == 1
+
+
+def test_mirror_post_import_builds_correct_tag_edges(store, tmp_path):
+    store.tags.import_exports(
+        tags=[
+            {"id": 1, "name": "river_otter", "category": 5},
+            {"id": 2, "name": "arctic_wolf", "category": 5},
+            {"id": 3, "name": "solo", "category": 0},
+        ],
+        export_date="2026-05-19",
+    )
+    rows = [
+        {
+            "id": "501",
+            "rating": "s",
+            "tag_string_species": "river_otter",
+            "tag_string_general": "solo",
+            "file_ext": "png",
+            "md5": "11111111111111111111111111111111",
+        },
+        {
+            "id": "502",
+            "rating": "s",
+            "tag_string_species": "arctic_wolf",
+            "tag_string_general": "solo",
+            "file_ext": "png",
+            "md5": "22222222222222222222222222222222",
+        },
+    ]
+
+    report = store.imports.import_mirror_posts(_write_post_export(tmp_path, rows))
+
+    assert report.accepted == 2
+    # Each unique species tag should be stored as an edge to the correct post.
+    assert set(store.tags.names_for_post(501)) == {"river_otter", "solo"}
+    assert set(store.tags.names_for_post(502)) == {"arctic_wolf", "solo"}
+    language = E621QueryLanguage(tag_database=store.tags)
+    assert store.posts.search(language.compile("river_otter")).ids() == (501,)
+
+
+def test_mirror_post_import_records_missing_tag_references_without_rejecting_post(store, tmp_path):
+    store.tags.import_exports(
+        tags=[
+            {"id": 1, "name": "solo", "category": 0},
+        ],
+        export_date="2026-05-20",
+    )
+    rows = [
+        {
+            "id": "601",
+            "rating": "s",
+            "tag_string": "solo missing_from_tag_export",
+            "file_ext": "jpg",
+            "md5": "33333333333333333333333333333333",
+        },
+    ]
+
+    report = store.imports.import_mirror_posts(_write_post_export(tmp_path, rows))
+
+    unresolved = store.database.fetch_all(
+        """
+        SELECT antecedent_name, consequent_name
+        FROM tag_import_unresolved
+        WHERE relation_kind = 'post_tag'
+        """
+    )
+    assert report.accepted == 1
+    assert report.rejected == 0
+    assert set(store.tags.names_for_post(601)) == {"solo"}
+    assert [(row["antecedent_name"], row["consequent_name"]) for row in unresolved] == [
+        ("601", "missing_from_tag_export"),
+    ]
+
+
+def _write_post_export(tmp_path: Path, rows: list[dict[str, str]]) -> Path:
+    path = tmp_path / "posts-2026-05-20.csv.gz"
+    fieldnames = tuple(dict.fromkeys(key for row in rows for key in row))
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return path

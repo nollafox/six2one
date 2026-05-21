@@ -5,6 +5,7 @@ from typing import Any
 
 from .base import BaseRepository
 from ..models import Collection, CollectionKind
+from ..models.enums import PoolCategory
 from ..models.tag import normalize_tag_name
 from ..models.time import utc_now_ms
 
@@ -78,6 +79,78 @@ class CollectionRepository(BaseRepository):
                 )
         return self.get(collection_id)
 
+    def import_export_rows(self, rows: Iterable[Mapping[str, object]]) -> int:
+        """Import e621 collection CSV export rows for this collection kind."""
+
+        now_ms = utc_now_ms()
+        collection_rows: list[tuple[object, ...]] = []
+        detail_rows: list[tuple[object, ...]] = []
+        edge_rows: list[tuple[object, ...]] = []
+
+        for row in rows:
+            collection_id = _required_int(row.get("id"))
+            post_ids = _post_ids(row.get("post_ids"))
+            name = _optional_str(row.get("name"))
+            normalized = normalize_tag_name(name) if name else None
+            collection_rows.append(
+                (
+                    int(self.kind),
+                    collection_id,
+                    name,
+                    normalized,
+                    _optional_str(row.get("shortname")),
+                    _category_id(row.get("category")),
+                    _int(row.get("post_count"), default=len(post_ids)),
+                    _optional_int(row.get("creator_id")),
+                    now_ms,
+                )
+            )
+            detail_rows.append((int(self.kind), collection_id, _optional_str(row.get("description"))))
+            for sequence, post_id in enumerate(post_ids):
+                edge_rows.append((int(self.kind), collection_id, sequence, int(post_id)))
+
+        with self.database.write_if_needed():
+            if collection_rows:
+                self.database.execute_many(
+                    """
+                    INSERT INTO collections (
+                        collection_kind_id, collection_id, name, normalized_name,
+                        shortname, category_id, post_count, creator_id, cached_ms
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(collection_kind_id, collection_id) DO UPDATE SET
+                        name = excluded.name,
+                        normalized_name = excluded.normalized_name,
+                        shortname = excluded.shortname,
+                        category_id = excluded.category_id,
+                        post_count = excluded.post_count,
+                        creator_id = excluded.creator_id,
+                        cached_ms = excluded.cached_ms
+                    """,
+                    collection_rows,
+                )
+            if detail_rows:
+                self.database.execute_many(
+                    """
+                    INSERT INTO collection_details (collection_kind_id, collection_id, description)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(collection_kind_id, collection_id) DO UPDATE SET
+                        description = excluded.description
+                    """,
+                    detail_rows,
+                )
+            if edge_rows:
+                self.database.execute_many(
+                    """
+                    INSERT OR IGNORE INTO collection_post_edges (
+                        collection_kind_id, collection_id, sequence, post_id
+                    )
+                    SELECT ?, ?, ?, post_id FROM posts WHERE post_id = ?
+                    """,
+                    edge_rows,
+                )
+        return len(collection_rows)
+
     def get(self, collection_id: int) -> Collection:
         collection = self.database.fetch_model(
             Collection,
@@ -113,16 +186,36 @@ def _post_ids(value: object) -> tuple[int, ...]:
     if value is None:
         return ()
     if isinstance(value, str):
-        return tuple(int(part) for part in value.replace(",", " ").split() if part)
+        stripped = value.strip().lstrip("{").rstrip("}")
+        return tuple(int(part) for part in stripped.replace(",", " ").split() if part)
     if isinstance(value, Iterable):
         return tuple(int(part) for part in value)
     raise ValueError(f"unsupported collection post_ids value: {value!r}")
 
 
+def _category_id(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    category = PoolCategory.from_e621(value)
+    return int(category) if category is not None else _optional_int(value)
+
+
+def _required_int(value: object) -> int:
+    parsed = _optional_int(value)
+    if parsed is None:
+        raise ValueError(f"integer value is required: {value!r}")
+    return parsed
+
+
+def _int(value: object, *, default: int) -> int:
+    parsed = _optional_int(value)
+    return default if parsed is None else parsed
+
+
 def _optional_int(value: object) -> int | None:
     if value is None or value == "":
         return None
-    return int(value)
+    return int(float(str(value)))
 
 
 def _optional_str(value: object) -> str | None:

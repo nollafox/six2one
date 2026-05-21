@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from six2one._commands.queue import run_queue, run_queue_clear
+from six2one._commands.queue.planning import image_payload
 from six2one.queue.models import JobKind, JobState
+from six2one.storage.models import ImageVariant
 from six2one.storage import open_storage
 from tests.factories import FakeE621, post_payload
 from tests.support import initialized_config
@@ -47,6 +49,21 @@ def test_queue_clear_uses_alias_and_implication_semantics_not_query_strings(tmp_
     assert result.pending_removed == 1
     assert jobs[1].state is JobState.CANCELLED
     assert jobs[2].state is JobState.READY
+
+
+def test_preview_and_sample_payloads_do_not_reuse_original_checksum():
+    raw = post_payload(1)
+
+    preview = image_payload(raw, ImageVariant.PREVIEW)
+    sample = image_payload(raw, ImageVariant.SAMPLE)
+    original = image_payload(raw, ImageVariant.ORIGINAL)
+
+    assert original is not None
+    assert original["md5"] == raw["file"]["md5"]
+    assert preview is not None
+    assert preview["md5"] is None
+    assert sample is not None
+    assert sample["md5"] is None
 
 
 def _initialize_tagged_storage(tmp_path: Path):

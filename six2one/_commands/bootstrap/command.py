@@ -21,6 +21,7 @@ class BootstrapSummary:
     home: Path
     storage_path: Path
     images_dir: Path
+    index_dir: Path
     marker_path: Path
     tag_snapshot: str
     tags_count: int
@@ -37,6 +38,7 @@ class BootstrapSummary:
             "home": str(self.home),
             "storage_path": str(self.storage_path),
             "images_dir": str(self.images_dir),
+            "index_dir": str(self.index_dir),
             "bootstrap_marker": str(self.marker_path),
             "tag_snapshot": self.tag_snapshot,
             "tags_count": self.tags_count,
@@ -80,6 +82,8 @@ class Bootstrap:
             diagnostics.append("CACHE_DIR_MISSING")
         if not self.config.images_dir.is_dir():
             diagnostics.append("IMAGES_DIR_MISSING")
+        if not self.config.index_dir.is_dir():
+            diagnostics.append("INDEX_DIR_MISSING")
 
         storage_status = validate_storage(self.config.storage_path)
         if not storage_status.ready:
@@ -147,6 +151,7 @@ class Bootstrap:
             home=self.config.root,
             storage_path=self.config.storage_path,
             images_dir=self.config.images_dir,
+            index_dir=self.config.index_dir,
             marker_path=self.config.marker_path,
             tag_snapshot=snapshot,
             tags_count=status.tags_count,
@@ -162,6 +167,7 @@ class Bootstrap:
         self.config.cache_dir.mkdir(parents=True, exist_ok=True)
         self.config.images_dir.mkdir(parents=True, exist_ok=True)
         self.config.exports_dir.mkdir(parents=True, exist_ok=True)
+        self.config.index_dir.mkdir(parents=True, exist_ok=True)
 
     def _write_config(self) -> None:
         self.config.config_path.write_text(
@@ -171,6 +177,7 @@ class Bootstrap:
                     f'home = "{self.config.root}"',
                     f'storage = "{self.config.storage_path}"',
                     f'images = "{self.config.images_dir}"',
+                    f'index = "{self.config.index_dir}"',
                     f'default_image_variant = "{self.config.default_image_variant}"',
                     "",
                     "[e621]",
@@ -186,6 +193,7 @@ class Bootstrap:
             "bootstrapped_at": datetime.now(timezone.utc).isoformat(),
             "storage": str(summary.storage_path),
             "images": str(summary.images_dir),
+            "index": str(summary.index_dir),
             "tag_snapshot": summary.tag_snapshot,
             "tags_count": summary.tags_count,
         }
@@ -213,6 +221,7 @@ class BootstrapCommand:
             "home": display_path(self.config.root),
             "storage_path": display_path(self.config.storage_path),
             "images_dir": display_path(self.config.images_dir),
+            "index_dir": display_path(self.config.index_dir),
             "phase": "Phase 1/3: Preparing workspace",
             "detail_1": "Root                     pending",
             "detail_2": "Storage                  pending",
@@ -288,6 +297,7 @@ class BootstrapCommand:
             "home": display_path(summary.home),
             "storage_path": display_path(summary.storage_path),
             "images_dir": display_path(summary.images_dir),
+            "index_dir": display_path(summary.index_dir),
             "tag_snapshot": summary.tag_snapshot,
             "tags_count": f"{summary.tags_count:,}",
             "aliases_count": f"{summary.aliases_count:,}",

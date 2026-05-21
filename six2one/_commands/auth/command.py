@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from six2one.e621 import E621Client
-from six2one.e621.errors import E621AuthError, E621PermissionError
+from six2one.e621.errors import E621APIError, E621AuthError, E621PermissionError
 
 from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.errors import CommandError
@@ -126,6 +126,8 @@ class AuthCommand:
             user = client.me()
         except (E621AuthError, E621PermissionError) as error:
             raise CommandError("e621 rejected the username or API token.") from error
+        except E621APIError as error:
+            raise CommandError(f"Could not verify credentials with e621: {error}") from error
         user_id = getattr(user, "id", None)
         return AuthAccount(username=getattr(user, "name", username) or username, user_id=int(user_id) if user_id is not None else None)
 

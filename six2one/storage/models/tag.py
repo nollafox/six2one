@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import struct
 from dataclasses import dataclass
 
 from .enums import AliasStatus, TagCategory
@@ -16,6 +17,28 @@ def normalize_tag_name(name: str) -> str:
     if not normalized:
         raise ValueError("tag name must not be empty")
     return normalized
+
+
+def pack_tag_ids(tag_ids: tuple[int, ...]) -> bytes:
+    """Pack sorted tag IDs for compact per-post tag hydration."""
+
+    values = tuple(sorted({int(tag_id) for tag_id in tag_ids}))
+    if not values:
+        return b""
+    return struct.pack(f"<{len(values)}I", *values)
+
+
+def unpack_tag_ids(value: bytes | memoryview | None) -> tuple[int, ...]:
+    """Unpack the compact per-post tag set representation."""
+
+    if value is None:
+        return ()
+    raw = bytes(value)
+    if not raw:
+        return ()
+    if len(raw) % 4 != 0:
+        raise ValueError("packed tag ID blob length must be divisible by 4")
+    return struct.unpack(f"<{len(raw) // 4}I", raw)
 
 
 @dataclass(frozen=True, slots=True)

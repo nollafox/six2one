@@ -8,12 +8,14 @@ from typing import Any
 from tqdm import tqdm
 
 from six2one.e621 import E621Client
+from six2one.e621.errors import E621APIError, E621NotFoundError
 from six2one.queue import Queue, default_registry
 from six2one.queue.models import JobKind, JobState
 from six2one.storage import create_storage, import_mirror_exports
 from six2one.storage.models import ImageVariant
 
 from six2one._commands.config import SixTwoOneConfig
+from six2one._commands.errors import CommandError
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +45,13 @@ def run_mirror(
     with tempfile.TemporaryDirectory(prefix="six2one-mirror-") as tmp:
         download_dir = Path(tmp)
         with create_storage(config.storage_path) as storage:
-            result = import_mirror_exports(storage, client, date=date, download_dir=download_dir, progress=progress)
+            try:
+                result = import_mirror_exports(storage, client, date=date, download_dir=download_dir, progress=progress)
+            except E621NotFoundError as error:
+                target = date or "the latest shared export date"
+                raise CommandError(f"No e621 DB export was found for {target}.") from error
+            except E621APIError as error:
+                raise CommandError(f"Could not mirror e621 DB exports: {error}") from error
             image_jobs_queued = _queue_stale_originals(storage, progress=progress)
 
     tags = result.tags

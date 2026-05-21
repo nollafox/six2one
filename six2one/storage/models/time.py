@@ -28,6 +28,17 @@ def parse_e621_time_ms(value: object) -> int | None:
     text = str(value).strip()
     if not text:
         return None
+    # PostgreSQL trims trailing zeros from microseconds, producing 1–5 significant
+    # digits (e.g. ".06082" instead of ".060820"). Python 3.10 fromisoformat only
+    # accepts exactly 3 or 6 fractional digits, so pad to 6.
+    dot = text.find(".")
+    if dot != -1:
+        frac_end = dot + 1
+        while frac_end < len(text) and text[frac_end].isdigit():
+            frac_end += 1
+        frac = text[dot + 1 : frac_end]
+        if len(frac) not in (3, 6):
+            text = text[: dot + 1] + frac.ljust(6, "0")[:6] + text[frac_end:]
     # PostgreSQL COPY emits bare ±HH offset (e.g. "+00") without minutes.
     # fromisoformat requires ±HH:MM in Python 3.10; append ":00" for the common case.
     if len(text) > 3 and text[-3] in ("+", "-") and text[-2:].isdigit():

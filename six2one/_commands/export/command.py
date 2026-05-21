@@ -7,7 +7,6 @@ from typing import Any
 
 from six2one.e621 import E621Client
 from six2one.queue import Queue, default_registry
-from six2one.queue.jobs.evaluate_query import StorageQueryData
 from six2one.storage import open_storage
 from six2one.storage.models import PostLoad
 
@@ -66,7 +65,12 @@ def run_export(
                 failed_jobs = summary.failed_jobs
             storage.source_runs.update_state(source_run.id, "success" if failed_jobs == 0 else "paused")
 
-        matches = storage.posts.get_many(candidate_ids, load=PostLoad.full()) if compiled is None else storage.posts.matching(compiled, ids=candidate_ids, data=StorageQueryData(storage))
+        if compiled is None:
+            matches = storage.posts.get_many(candidate_ids, load=PostLoad.full())
+        else:
+            downloaded = {int(post_id) for post_id in candidate_ids}
+            matched_ids = [int(post_id) for post_id in storage.posts.search(compiled).ids() if int(post_id) in downloaded]
+            matches = storage.posts.get_many(matched_ids, load=PostLoad.full())
         match_ids = {post.id for post in matches}
         images = storage.files.downloaded_for_posts(match_ids)
 

@@ -5,7 +5,7 @@ from typing import Any, Mapping
 from ..job import Job, JobResult, NewJob
 from ..models import JobKind
 from six2one.query import E621QueryLanguage
-from six2one.storage.models import ImageVariant, SourceRunId
+from six2one.storage.models import ImageVariant, PostLoad, SourceRunId
 
 
 class EvaluateQueryJob(Job):
@@ -42,9 +42,11 @@ class EvaluateQueryJob(Job):
             raise ValueError("evaluate_query requires query or source_run_id with stored query")
         language = context.query_language or E621QueryLanguage(tag_database=getattr(context.store, "tags", None))
         compiled = language.compile(query)
-        data = StorageQueryData(context.store)
         candidate_count = context.store.posts.count() if post_ids is None else len(tuple(post_ids))
-        matches = context.store.posts.matching(compiled, ids=post_ids, data=data)
+        indexed_ids = {int(post_id) for post_id in context.store.posts.search(compiled).ids()}
+        if post_ids is not None:
+            indexed_ids &= {int(post_id) for post_id in post_ids}
+        matches = context.store.posts.get_many(sorted(indexed_ids), load=PostLoad.full())
 
         variant = _variant_from_value(image_variant)
         enqueue: list[NewJob] = []
@@ -99,51 +101,6 @@ class EvaluateQueryJob(Job):
             metadata={"candidates": candidate_count, "matches": len(matches), "download_jobs": len(enqueue)},
             enqueue=tuple(enqueue),
         )
-
-
-class StorageQueryData:
-    """Query sidecar adapter backed by storage stores when present."""
-
-    def __init__(self, store: Any) -> None:
-        self.store = store
-
-    def _rows(self, store_name: str, method: str, post_id: int):
-        store = getattr(self.store, store_name, None)
-        if store is None:
-            return ()
-        func = getattr(store, method, None)
-        if func is None:
-            return ()
-        rows = func(post_id)
-        return tuple(_row_mapping(row) for row in rows)
-
-    def comments_for(self, post_id: int): return self._rows("comments", "for_post", post_id)
-    def notes_for(self, post_id: int): return self._rows("notes", "for_post", post_id)
-    def note_versions_for(self, post_id: int): return self._rows("note_versions", "for_post", post_id)
-    def favorites_for(self, post_id: int): return self._rows("favorites", "for_post", post_id)
-    def votes_for(self, post_id: int): return self._rows("post_votes", "for_post", post_id)
-    def approvals_for(self, post_id: int): return self._rows("post_approvals", "for_post", post_id)
-    def pools_for(self, post_id: int): return self._rows("pools", "for_post", post_id)
-    def sets_for(self, post_id: int): return self._rows("sets", "for_post", post_id)
-    def replacements_for(self, post_id: int): return self._rows("post_replacements", "for_post", post_id)
-    def deletion_events_for(self, post_id: int):
-        return (*self._rows("post_flags", "for_post", post_id), *self._rows("post_events", "for_post", post_id), *self._rows("post_versions", "for_post", post_id))
-
-
-def _row_mapping(row: Any) -> Mapping[str, Any]:
-    if isinstance(row, Mapping):
-        return row
-    raw = getattr(row, "raw", None)
-    if isinstance(raw, Mapping):
-        return raw
-    data = getattr(row, "_data", None)
-    if isinstance(data, Mapping):
-        return data
-    if hasattr(row, "to_dict"):
-        value = row.to_dict()
-        if isinstance(value, Mapping):
-            return value
-    return getattr(row, "__dict__", {})
 
 
 def _variant_payload(raw: Mapping[str, Any], variant: ImageVariant) -> dict[str, Any] | None:

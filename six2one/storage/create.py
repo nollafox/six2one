@@ -77,6 +77,7 @@ def validate_storage(path: str | Path) -> StorageStatus:
         "posts",
         "tags",
         "post_tag_edges",
+        "post_tag_sets",
         "post_files",
         "queue_jobs",
         "import_runs",

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from six2one._commands.mirror import run_mirror
 from six2one._commands.config import SixTwoOneConfig
+from six2one._commands.errors import CommandError
+from six2one.e621.errors import E621NotFoundError
 from six2one.storage import create_storage, open_storage
 from six2one.storage.models import PostLoad
 from six2one.queue.models import JobKind
@@ -31,7 +36,8 @@ def test_mirror_imports_query_relevant_exports_with_progress(tmp_path: Path):
     assert post is not None
     assert post.summary.duration_ms == 154
     assert post.raw["duration"] == 154
-    assert post.raw["tags"]["general"] == ["domestic_cat", "solo"]
+    assert post.raw["tags"]["general"] == ["solo"]
+    assert post.raw["tags"]["species"] == ["domestic_cat"]
     assert pool.name == "cute_cats"
     assert tag.canonical_name == "domestic_cat"
     assert result.image_jobs_queued == 0
@@ -44,6 +50,11 @@ def test_mirror_imports_query_relevant_exports_with_progress(tmp_path: Path):
         "Downloading pools-2026-05-18.csv.gz",
         "Building implication closure",
         "Importing posts",
+        "Committing posts (1 accepted, 0 rejected)",
+        "Finalizing post import",
+        "Rebuilding indexes",
+        "Writing search bitmaps",
+        "Writing ordered indexes",
         "Importing pools",
     }
     assert not (config.exports_dir / "posts-2026-05-18.csv.gz").exists()
@@ -70,7 +81,7 @@ def test_mirror_after_bootstrap_tag_import_does_not_update_referenced_tag_ids(tm
         domestic_cat = storage.tags.get_by_name("domestic_cat")
         alias = storage.tags.resolve("cat")
 
-    assert result.tags_count == 1
+    assert result.tags_count == 2
     assert domestic_cat is not None
     assert alias.canonical_name == "domestic_cat"
 
@@ -90,6 +101,21 @@ def test_mirror_imports_pools_with_postgres_array_post_ids(tmp_path: Path):
         pool = storage.pools.for_post(100)[0]
     assert result.pools_count == 1
     assert pool.name == "cute_cats"
+
+
+def test_mirror_normalizes_negative_export_comment_count(tmp_path: Path):
+    # Historical e621 CSV rows can contain -1 comment_count values. The store's
+    # hot post table keeps counters non-negative, so the export adapter clamps
+    # that sentinel at the import boundary.
+    config = SixTwoOneConfig(home=tmp_path / "home")
+    e621 = _MirrorE621(comment_count="-1")
+
+    run_mirror(config, date="2026-05-18", e621=e621, progress=_ProgressSpy())
+
+    with open_storage(config.storage_path, read_only=True) as storage:
+        post = storage.posts.get(100, load=PostLoad.summary())
+
+    assert post.summary.comment_count == 0
 
 
 def test_mirror_imports_pools_skips_edges_for_expunged_posts(tmp_path: Path):
@@ -142,7 +168,7 @@ def test_mirror_queues_stale_downloaded_original(tmp_path: Path):
             100, ImageVariant.ORIGINAL,
             local_path=local, bytes_written=14,
             checksum=bytes.fromhex(old_md5),
-            downloaded_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+            downloaded_at=datetime.now(timezone.utc),
         )
 
     result = run_mirror(config, date="2026-05-18", e621=_MirrorE621(md5=new_md5), progress=_ProgressSpy())
@@ -172,7 +198,7 @@ def test_mirror_skips_current_downloaded_original(tmp_path: Path):
             100, ImageVariant.ORIGINAL,
             local_path=local, bytes_written=18,
             checksum=bytes.fromhex(current_md5),
-            downloaded_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+            downloaded_at=datetime.now(timezone.utc),
         )
 
     result = run_mirror(config, date="2026-05-18", e621=_MirrorE621(md5=current_md5), progress=_ProgressSpy())
@@ -199,7 +225,7 @@ def test_mirror_skips_stale_image_deleted_from_disk(tmp_path: Path):
             100, ImageVariant.ORIGINAL,
             local_path=missing_path, bytes_written=0,
             checksum=bytes.fromhex(old_md5),
-            downloaded_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+            downloaded_at=datetime.now(timezone.utc),
         )
 
     result = run_mirror(config, date="2026-05-18", e621=_MirrorE621(md5=new_md5), progress=_ProgressSpy())
@@ -208,6 +234,13 @@ def test_mirror_skips_stale_image_deleted_from_disk(tmp_path: Path):
         jobs = storage.queue.list()
     assert result.image_jobs_queued == 0
     assert jobs == ()
+
+
+def test_mirror_reports_missing_export_date_without_traceback(tmp_path: Path):
+    config = SixTwoOneConfig(home=tmp_path / "home")
+
+    with pytest.raises(CommandError, match="No e621 DB export was found for 1900-01-01"):
+        run_mirror(config, date="1900-01-01", e621=_MissingMirrorE621(), progress=_ProgressSpy())
 
 
 class _ProgressSpy:
@@ -231,10 +264,23 @@ class _ProgressBarSpy:
     def update(self, _count):
         return None
 
+    def clear(self):
+        return None
+
+    def close(self):
+        return None
+
 
 class _MirrorDbExports:
-    def __init__(self, *, md5: str = "0123456789abcdef0123456789abcdef") -> None:
-        self.tags_export = FakeExport("tags", "2026-05-18", [{"id": "1", "name": "domestic_cat", "category": "5"}])
+    def __init__(self, *, md5: str = "0123456789abcdef0123456789abcdef", comment_count: str = "1") -> None:
+        self.tags_export = FakeExport(
+            "tags",
+            "2026-05-18",
+            [
+                {"id": "1", "name": "domestic_cat", "category": "5"},
+                {"id": "2", "name": "solo", "category": "0"},
+            ],
+        )
         self.aliases_export = FakeExport("tag_aliases", "2026-05-18", [{"id": "2", "antecedent_name": "cat", "consequent_name": "domestic_cat", "status": "active"}])
         self.implications_export = FakeExport("tag_implications", "2026-05-18", [])
         self.posts_export = FakeExport(
@@ -247,7 +293,7 @@ class _MirrorDbExports:
                     "tag_string": "domestic_cat solo",
                     "score": "12",
                     "fav_count": "3",
-                    "comment_count": "1",
+                    "comment_count": comment_count,
                     "file_ext": "png",
                     "md5": md5,
                     "image_width": "640",
@@ -272,5 +318,22 @@ class _MirrorDbExports:
 
 
 class _MirrorE621:
-    def __init__(self, *, md5: str = "0123456789abcdef0123456789abcdef") -> None:
-        self.db_exports = _MirrorDbExports(md5=md5)
+    def __init__(self, *, md5: str = "0123456789abcdef0123456789abcdef", comment_count: str = "1") -> None:
+        self.db_exports = _MirrorDbExports(md5=md5, comment_count=comment_count)
+
+
+class _MissingExport:
+    def download(self, destination, *, progress=None):
+        raise E621NotFoundError("not found", status_code=404)
+
+
+class _MissingMirrorDbExports:
+    def tags(self, date=None): return _MissingExport()
+    def tag_aliases(self, date=None): return _MissingExport()
+    def tag_implications(self, date=None): return _MissingExport()
+    def posts(self, date=None): return _MissingExport()
+    def pools(self, date=None): return _MissingExport()
+
+
+class _MissingMirrorE621:
+    db_exports = _MissingMirrorDbExports()

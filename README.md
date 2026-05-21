@@ -111,7 +111,11 @@ Enrichment is cached by post, not by query. Once six2one has comments for post `
 
 ## Local-first Search
 
-The first time a query needs a piece of data, six2one fetches it from e621. After that the data is local, and the next query that needs it reads from the cache instead of the network. Broad fetches fill the archive, narrower queries carve it, and exports turn matching downloaded posts into portable folders — none of it re-fetching what is already on disk.
+six2one keeps a canonical SQLite cache and a rebuildable search index side by side. SQLite stores the durable facts: posts, tags, aliases, implications, source runs, queue jobs, image records, enrichment coverage, and collection membership. The derived index stores the fast lookup shapes: tag and field bitmaps, ordered post-id lists, and text indexes for source, description, and note search.
+
+That split is what makes the workflow feel local-first without becoming fragile. A query is parsed and bound with e621-compatible semantics, including aliases and implications, then evaluated against the local index whenever the needed data is already present. If a query needs more data, such as comments, notes, pools, sets, favorites, votes, or moderation metadata, six2one queues the missing enrichment, stores it in SQLite, updates coverage, and reuses it the next time.
+
+Broad fetches fill the archive, narrower queries carve it, and exports turn matching downloaded posts into portable folders. Interrupted work is safe to resume because fetches run through the internal queue; downloaded images are keyed by post ID and variant rather than by query spelling, so aliases and overlapping searches converge on the same cached files.
 
 <p align="center">
   <img src="https://github.com/nollafox/six2one/raw/main/docs/flowchart.png" alt="six2one flowchart" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12); max-width: 100%; height: auto;">
@@ -123,14 +127,15 @@ A single run moves through the same stages, from a raw query to files on disk:
 query
   → compile the query
   → discover matching posts
-  → cache post JSON
+  → cache typed post fields
+  → update the local search index
   → fetch missing enrichment
   → evaluate the query locally
   → queue and download images
   → export semantic subsets
 ```
 
-Everything six2one caches lives under `~/.six2one`. The global cache is deliberate — it is what lets unrelated queries share data. Downloaded files are never scattered through your working directories; they stay in the workspace until you `export` them somewhere explicit.
+Everything six2one caches lives under `~/.six2one`. The global cache is deliberate — it is what lets unrelated queries share data. Cached source runs preserve raw query text, canonical query metadata, backend metadata, and timestamps, while enrichment coverage makes missing, pending, ready, and failed data explicit. Downloaded files are never scattered through your working directories; they stay in the workspace until you `export` them somewhere explicit.
 
 ## Local Storage
 
@@ -142,19 +147,24 @@ Everything six2one caches lives under `~/.six2one`. The global cache is delibera
   bootstrap.json
   cache/
     six2one.sqlite
+    index/
+      bitmaps.lmdb
+      delta.lmdb
+      ordered/
   images/
 ```
 
-The SQLite database holds the cache:
+SQLite is the canonical cache. The files under `cache/index/` are derived search indexes that make local query evaluation fast and rebuildable:
 
 | Data | Purpose |
 |---|---|
-| Cached posts | Raw post JSON and searchable post fields. |
+| Cached posts | Typed post fields, tags, files, sources, and details. |
 | Source runs | Query runs and discovery metadata. |
 | Queue jobs | Pending, running, failed, and completed work. |
 | Enrichment coverage | Which sidecar data has already been fetched. |
 | Tags | Tag metadata, aliases, implications, and categories. |
 | Images | Where downloaded image variants live on disk. |
+| Search index | Roaring bitmap, ordered, and text indexes derived from SQLite. |
 
 Images are stored on disk by post ID and variant, so if two queries match the same post and ask for the same variant, the image is downloaded only once:
 

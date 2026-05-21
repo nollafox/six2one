@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
 from .base import BaseRepository
 from ..database import TagNotFound
 from ..models import AliasStatus, Found, Lookup, Missing, Tag, TagCategory, TagId, TagNameSet, TagResolution, normalize_tag_name
+from ..models.tag import unpack_tag_ids
 from ..models.time import utc_now_ms
 
 
@@ -134,14 +136,19 @@ class TagRepository(BaseRepository):
         aliases: Iterable[Mapping[str, object]] = (),
         implications: Iterable[Mapping[str, object]] = (),
         export_date: str,
+        progress=None,
     ) -> TagImportReport:
         now_ms = utc_now_ms()
         with self.database.write_if_needed():
             self.database.execute("DELETE FROM tag_import_unresolved")
-            tag_count = self._import_tags(tags, now_ms=now_ms)
-            alias_count = self._import_aliases(aliases)
-            implication_count, unresolved_count = self._import_implications(implications, now_ms=now_ms)
-            closure_count = self._build_implication_closure()
+            tag_count = self._import_tags(_progress_iter(progress, tags, desc="Importing tags", unit="row"), now_ms=now_ms)
+            alias_count = self._import_aliases(_progress_iter(progress, aliases, desc="Importing aliases", unit="row"))
+            implication_count, unresolved_count = self._import_implications(
+                _progress_iter(progress, implications, desc="Importing implications", unit="row"),
+                now_ms=now_ms,
+            )
+            with _progress_bar(progress, desc="Building implication closure", total=2, unit="step") as bar:
+                closure_count = self._build_implication_closure(progress_bar=bar)
         return TagImportReport(
             export_date=export_date,
             tags_count=tag_count,
@@ -152,6 +159,9 @@ class TagRepository(BaseRepository):
         )
 
     def for_post(self, post_id: int) -> tuple[Tag, ...]:
+        packed = self.database.fetch_scalar("SELECT tag_ids FROM post_tag_sets WHERE post_id = ?", (int(post_id),))
+        if packed is not None:
+            return self._tags_for_ids(unpack_tag_ids(packed))
         return self.database.fetch_models(
             Tag,
             """
@@ -165,6 +175,9 @@ class TagRepository(BaseRepository):
         )
 
     def names_for_post(self, post_id: int) -> tuple[str, ...]:
+        packed = self.database.fetch_scalar("SELECT tag_ids FROM post_tag_sets WHERE post_id = ?", (int(post_id),))
+        if packed is not None:
+            return tuple(tag.name for tag in self._tags_for_ids(unpack_tag_ids(packed)))
         rows = self.database.fetch_all(
             """
             SELECT t.name
@@ -176,6 +189,21 @@ class TagRepository(BaseRepository):
             (int(post_id),),
         )
         return tuple(str(row["name"]) for row in rows)
+
+    def _tags_for_ids(self, tag_ids: tuple[int, ...]) -> tuple[Tag, ...]:
+        if not tag_ids:
+            return ()
+        placeholders = ",".join("?" for _ in tag_ids)
+        return self.database.fetch_models(
+            Tag,
+            f"""
+            SELECT *
+            FROM tags
+            WHERE tag_id IN ({placeholders})
+            ORDER BY category_id, name
+            """,
+            tag_ids,
+        )
 
     def save(
         self,
@@ -475,7 +503,7 @@ class TagRepository(BaseRepository):
             rows,
         )
 
-    def _build_implication_closure(self) -> int:
+    def _build_implication_closure(self, *, progress_bar=None) -> int:
         self.database.execute("DELETE FROM tag_implication_closure")
         rows = self.database.fetch_all(
             """
@@ -488,6 +516,7 @@ class TagRepository(BaseRepository):
         graph: dict[int, set[int]] = {}
         for row in rows:
             graph.setdefault(int(row["antecedent_tag_id"]), set()).add(int(row["consequent_tag_id"]))
+        _progress_update(progress_bar)
 
         closure_rows: list[tuple[int, int, int, int | None]] = []
         for root in graph:
@@ -511,7 +540,25 @@ class TagRepository(BaseRepository):
                 """,
                 closure_rows,
             )
+        _progress_update(progress_bar)
         return len(closure_rows)
+
+
+def _progress_iter(progress, iterable, **kwargs):
+    if progress is None:
+        return iterable
+    return progress(iterable, **kwargs)
+
+
+def _progress_bar(progress, **kwargs):
+    if progress is None:
+        return nullcontext(None)
+    return progress(None, **kwargs)
+
+
+def _progress_update(bar, amount: int = 1) -> None:
+    if bar is not None and hasattr(bar, "update"):
+        bar.update(amount)
 
 
 def _optional_int(value: object) -> int | None:

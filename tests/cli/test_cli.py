@@ -13,6 +13,7 @@ from six2one._commands.fetch.command import FetchCommandResult, FetchDiscoverySu
 from six2one._commands.mirror.command import MirrorResult
 from six2one._commands.queue.command import QueueAmendResult, QueueCommandResult, QueueRunSummary
 from six2one.cli import main
+from six2one.e621.errors import E621APIError
 
 
 def test_top_level_help_includes_current_commands():
@@ -217,6 +218,20 @@ def test_auth_remove_deletes_home_auth_file(tmp_path: Path):
     assert result.stderr == ""
 
 
+def test_auth_test_reports_api_failure_without_traceback(tmp_path: Path):
+    auth_file = tmp_path / "auth.toml"
+    auth_file.write_text('[e621]\nusername = "hexerade"\napi_token = "fake-api-key"\n', encoding="utf-8")
+
+    with patch("six2one._commands.config.DEFAULT_HOME", tmp_path):
+        with patch("six2one._commands.auth.command.E621Client", return_value=_FailingAuthClient()):
+            result = _run_cli("auth", "--test")
+
+    assert result.exit_code == 1
+    assert "Authentication failed." in result.stdout
+    assert "Could not verify credentials with e621: Network error contacting e621" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
 class _CliResult:
     def __init__(self, *, exit_code: int, stdout: str, stderr: str) -> None:
         self.exit_code = exit_code
@@ -265,3 +280,8 @@ class _FakeUser:
 class _FakeAuthClient:
     def me(self) -> _FakeUser:
         return _FakeUser()
+
+
+class _FailingAuthClient:
+    def me(self) -> _FakeUser:
+        raise E621APIError("Network error contacting e621")

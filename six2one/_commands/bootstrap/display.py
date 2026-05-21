@@ -20,6 +20,7 @@ LIVE = Template(
       Home                     {home}
       Storage                  {storage_path}
       Images                   {images_dir}
+      Search index             {index_dir}
 
     {phase}
       {detail_1}
@@ -38,6 +39,7 @@ SUMMARY = Template(
       Home                     {home}
       Storage                  {storage_path}
       Images                   {images_dir}
+      Search index             {index_dir}
       Tag snapshot             {tag_snapshot}
       Tags                     {tags_count}
       Aliases                  {aliases_count}
@@ -63,6 +65,7 @@ ALREADY_BOOTSTRAPPED = Template(
       Home                     {home}
       Storage                  {storage_path}
       Images                   {images_dir}
+      Search index             {index_dir}
 
     Tag database
       Status                   ready

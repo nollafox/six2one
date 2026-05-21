@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..config import StoreConfig
 from ..database import SQLite
+from ..index import IndexConfig
 from ..models import CollectionKind
 from .collections import CollectionRepository
 from .files import FileRepository
@@ -15,6 +16,7 @@ from .maintenance import MaintenanceRepository
 from .metadata import MetadataRepository
 from .posts import PostRepository
 from .queue import QueueRepository
+from .search import SearchRepository
 from .source_runs import SourceRunRepository
 from .tags import TagRepository
 
@@ -28,18 +30,22 @@ class Store:
 
     def __init__(self, database: SQLite) -> None:
         self.database = database
+        index_root = database.config.index_dir or (database.path.parent / "index")
+        self.search = SearchRepository(database, IndexConfig(index_root))
         self.metadata = MetadataRepository(database)
         self.runs = SourceRunRepository(database)
         self.source_runs = self.runs
-        self.posts = PostRepository(database)
+        self.posts = PostRepository(database, self.search)
         self.tags = TagRepository(database)
         self.files = FileRepository(database)
         self.pools = CollectionRepository(database, kind=CollectionKind.POOL)
         self.sets = CollectionRepository(database, kind=CollectionKind.SET)
         self.coverage = EnrichmentCoverageRepository(database)
         self.queue = QueueRepository(database)
-        self.imports = ImportRepository(database)
+        self.imports = ImportRepository(database, self.search)
         self.maintenance = MaintenanceRepository(database)
+        if not database.config.read_only:
+            self.search.provision()
 
     @classmethod
     def open(cls, config: StoreConfig | str | Path, *, read_only: bool | None = None) -> "Store":

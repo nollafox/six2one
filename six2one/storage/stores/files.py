@@ -10,9 +10,8 @@ from ..models.time import datetime_to_ms, utc_now_ms
 
 
 _FILE_SELECT = """
-SELECT pf.*, s.source_url
+SELECT pf.*
 FROM post_files AS pf
-LEFT JOIN sources AS s ON s.source_id = pf.source_id
 """
 
 

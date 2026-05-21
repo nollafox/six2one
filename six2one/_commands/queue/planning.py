@@ -138,7 +138,9 @@ def queue_query_work(
         # No auxiliary data is missing, so evaluate immediately and enqueue
         # download_image jobs now. Queries with missing dependencies get an
         # evaluate_query job that runs after enrichment jobs complete.
-        matches = storage.posts.matching(compiled, ids=post_ids)
+        matching_ids = set(storage.posts.search(compiled).ids())
+        current_ids = set(int(post_id) for post_id in post_ids)
+        matches = storage.posts.get_many(sorted(matching_ids & current_ids), load=PostLoad.full())
         image_counts = _enqueue_image_jobs(
             config=config,
             storage=storage,
@@ -418,7 +420,7 @@ def image_payload(raw: Mapping[str, Any], variant: str | ImageVariant) -> dict[s
         "width": data.get("width"),
         "height": data.get("height"),
         "size_bytes": data.get("size"),
-        "md5": file_data.get("md5"),
+        "md5": None,
     }
 
 
@@ -442,13 +444,16 @@ def _ext_from_url(url: str) -> str | None:
     return filename.rsplit(".", 1)[-1]
 
 def locally_matching_post_ids(storage: Storage, query: str, *, candidate_post_ids=None) -> set[int]:
-    """Evaluate a semantic query against cached post JSON."""
+    """Evaluate a semantic query through the storage search index."""
 
     compiled = compile_query(storage, query)
     if candidate_post_ids is None:
         raise ValueError("locally_matching_post_ids requires an explicit candidate_post_ids iterable")
-    matches = storage.posts.matching(compiled, ids=candidate_post_ids)
-    return {post.id for post in matches}
+    candidates = {int(post_id) for post_id in candidate_post_ids}
+    if not candidates:
+        return set()
+    matches = {int(post_id) for post_id in storage.posts.search(compiled).ids()}
+    return matches & candidates
 
 
 _DOWNLOAD_JOB_KINDS = frozenset((JobKind.DOWNLOAD_ORIGINAL, JobKind.DOWNLOAD_SAMPLE, JobKind.DOWNLOAD_PREVIEW))

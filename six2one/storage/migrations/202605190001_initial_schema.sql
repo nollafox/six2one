@@ -116,15 +116,18 @@ CREATE INDEX tags_by_category_count
 ON tags(category_id, post_count DESC, tag_id);
 
 CREATE TABLE post_tag_edges (
-    tag_id INTEGER NOT NULL,
     post_id INTEGER NOT NULL,
-    PRIMARY KEY (tag_id, post_id),
-    FOREIGN KEY (tag_id) REFERENCES tags(tag_id) ON DELETE CASCADE,
-    FOREIGN KEY (post_id) REFERENCES posts(post_id) ON DELETE CASCADE
+    tag_id INTEGER NOT NULL,
+    PRIMARY KEY (post_id, tag_id),
+    FOREIGN KEY (post_id) REFERENCES posts(post_id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES tags(tag_id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
-CREATE INDEX post_tag_edges_by_post
-ON post_tag_edges(post_id, tag_id);
+CREATE TABLE post_tag_sets (
+    post_id INTEGER PRIMARY KEY,
+    tag_ids BLOB NOT NULL,
+    FOREIGN KEY (post_id) REFERENCES posts(post_id) ON DELETE CASCADE
+) STRICT;
 
 CREATE TABLE tag_aliases (
     antecedent_tag_id INTEGER NOT NULL,

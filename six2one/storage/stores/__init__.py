@@ -6,7 +6,7 @@ from .coverage import EnrichmentCoverageRepository
 from .imports import ImportRepository
 from .maintenance import MaintenanceRepository
 from .metadata import MetadataRepository
-from .posts import PostQueryBuilder, PostRepository
+from .posts import PostRepository
 from .queue import QueueRepository
 from .source_runs import SourceRunRepository
 from .store import Storage, Store
@@ -19,7 +19,6 @@ __all__ = [
     "ImportRepository",
     "MaintenanceRepository",
     "MetadataRepository",
-    "PostQueryBuilder",
     "PostRepository",
     "QueueRepository",
     "SourceRunRepository",

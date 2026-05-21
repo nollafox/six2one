@@ -48,6 +48,7 @@ class SQLite:
         if read_only is not None and isinstance(config, StoreConfig) and read_only != config.read_only:
             resolved = StoreConfig(
                 path=config.path,
+                index_dir=config.index_dir,
                 read_only=read_only,
                 busy_timeout_ms=config.busy_timeout_ms,
                 cache_size_kib=config.cache_size_kib,
@@ -69,6 +70,7 @@ class SQLite:
                 uri=resolved.read_only,
                 isolation_level=None,
                 timeout=resolved.busy_timeout_ms / 1000,
+                check_same_thread=False,
             )
         except sqlite3.Error as error:
             raise DatabaseError(f"Could not open SQLite database: {database_path}") from error

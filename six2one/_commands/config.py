@@ -89,6 +89,10 @@ class SixTwoOneConfig:
         return self.cache_dir / "six2one.sqlite"
 
     @property
+    def index_dir(self) -> Path:
+        return self.cache_dir / "index"
+
+    @property
     def images_dir(self) -> Path:
         return self.root / "images"
 

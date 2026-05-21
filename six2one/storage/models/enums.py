@@ -179,12 +179,6 @@ class JobKind(IntEnum):
     ENRICH_ARTIST_VERSIONS = 28
 
 
-class ImportMode(IntEnum):
-    UPSERT_CHANGED = 1
-    INSERT_ONLY = 2
-    REPLACE = 3
-
-
 class PostOrder(IntEnum):
     POST_ID_ASC = 1
     POST_ID_DESC = 2

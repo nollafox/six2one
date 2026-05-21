@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import gzip
 from pathlib import Path
 
 from six2one.storage import create_storage, import_tag_exports
@@ -17,6 +19,10 @@ class FakeExport:
         for row in self._rows:
             yield row
 
+    def rows(self):
+        for row in self._rows:
+            yield row
+
     def download(self, destination, *, progress=None):
         self.downloaded_to = Path(destination) / self.filename
         self.downloaded_to.parent.mkdir(parents=True, exist_ok=True)
@@ -24,7 +30,11 @@ class FakeExport:
         if progress is not None:
             with progress(total=len(data), unit="B", unit_scale=True, unit_divisor=1024, desc=f"Downloading {self.filename}") as live:
                 live.update(len(data))
-        self.downloaded_to.write_bytes(data)
+        fieldnames = tuple(dict.fromkeys(key for row in self._rows for key in row))
+        with gzip.open(self.downloaded_to, "wt", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(self._rows)
         return self.downloaded_to
 
 

@@ -26,6 +26,8 @@ def test_bootstrap_creates_workspace_sqlite_store_and_marker(tmp_path: Path):
     assert config.marker_path.is_file()
     assert config.storage_path.is_file()
     assert config.images_dir.is_dir()
+    assert config.index_dir.is_dir()
+    assert (config.index_dir / "manifest.json").is_file()
     with open_storage(config.storage_path, read_only=True) as storage:
         assert storage.tags.status().ready is True
         assert storage.tags.resolve("cat").canonical_name == "domestic_cat"
@@ -119,8 +121,20 @@ def test_bootstrap_migrate_reports_each_applied_migration(tmp_path: Path):
 
     Bootstrap(config).migrate(on_migration=applied.append)
 
-    assert [m.version for m in applied] == ["202605190003"]
+    assert [m.version for m in applied] == [
+        "202605190003",
+        "202605190004",
+        "202605190005",
+        "202605190006",
+        "202605190007",
+        "202605190008",
+        "202605190009",
+        "202605190010",
+    ]
     assert applied[0].name == "source_run_metadata"
+    assert applied[1].name == "drop_raw_payloads"
+    assert applied[2].name == "post_file_source_url"
+    assert applied[3].name == "search_text_indexes"
 
 
 def _setup_db_at_migration_001(storage_path: Path, tmp_path: Path) -> None:

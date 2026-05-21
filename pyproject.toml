@@ -1,6 +1,6 @@
 [project]
 name = "six2one"
-version = "0.2.0"
+version = "0.3.0"
 description = "Manifest-backed e621/e926 dataset fetching from tiny numeric commands."
 authors = [
     {name = "Nolla Fox",email = "nollafox.dev@gmail.com"}

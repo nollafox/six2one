@@ -1,5 +1,6 @@
 .six2one-login.json
 output/
+index/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

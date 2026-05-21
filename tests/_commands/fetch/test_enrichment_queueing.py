@@ -209,15 +209,17 @@ def test_fetch_queues_required_enrichment_jobs(
     job_kinds = [job.kind for job in jobs]
 
     assert _remote_dependencies(result.data_dependencies) == expected_dependencies
-    assert result.discovery.enrichment_jobs == len(expected_enrichment_jobs)
+    expected_immediate_jobs = tuple(
+        job
+        for job in expected_enrichment_jobs
+        if job in {JobKind.ENRICH_USERS, JobKind.ENRICH_ARTISTS}
+    )
+    assert result.discovery.enrichment_jobs == len(expected_immediate_jobs)
     assert result.discovery.new_image_jobs == 0
-    assert job_kinds.count(JobKind.EVALUATE_QUERY) == 1
-    for job_kind in expected_enrichment_jobs:
+    assert job_kinds.count(JobKind.FETCH_PAGE) == 1
+    assert job_kinds.count(JobKind.EVALUATE_QUERY) == 0
+    for job_kind in expected_immediate_jobs:
         assert job_kinds.count(job_kind) == 1
-    for dependency in expected_dependencies:
-        if dependency not in {"UserIndex", "ArtistVerificationIndex"}:
-            with open_storage(config.storage_path, read_only=True) as storage:
-                assert storage.coverage.missing_post_ids(post_ids=(1, 2), dependency=dependency) == (1, 2)
 
 
 def test_fetch_skips_enrichment_jobs_when_coverage_is_ready(tmp_path):
@@ -238,7 +240,8 @@ def test_fetch_skips_enrichment_jobs_when_coverage_is_ready(tmp_path):
     assert result.discovery.enrichment_jobs == 1
     assert JobKind.ENRICH_COMMENTS not in job_kinds
     assert JobKind.ENRICH_USERS in job_kinds
-    assert JobKind.EVALUATE_QUERY in job_kinds
+    assert JobKind.FETCH_PAGE in job_kinds
+    assert JobKind.EVALUATE_QUERY not in job_kinds
 
 
 def test_fetch_enriches_remote_and_local_candidates_before_evaluation(tmp_path):
@@ -255,9 +258,9 @@ def test_fetch_enriches_remote_and_local_candidates_before_evaluation(tmp_path):
 
     comments_job = next(job for job in jobs if job.kind is JobKind.ENRICH_COMMENTS)
     evaluate_job = next(job for job in jobs if job.kind is JobKind.EVALUATE_QUERY)
-    assert result.discovery.cached_posts == 2
-    assert comments_job.payload["post_ids"] == [1, 2]
-    assert evaluate_job.payload["post_ids"] == [1, 2]
+    assert result.discovery.cached_posts == 1
+    assert comments_job.payload["post_ids"] == [2]
+    assert evaluate_job.payload["post_ids"] == [2]
 
 
 def _idle_run_summary():

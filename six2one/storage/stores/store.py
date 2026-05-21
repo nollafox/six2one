@@ -9,6 +9,20 @@ from ..database import SQLite
 from ..index import IndexConfig
 from ..models import CollectionKind
 from .collections import CollectionRepository
+from .enrichment import (
+    ArtistRepository,
+    CommentRepository,
+    FavoriteRepository,
+    NoteRepository,
+    NoteVersionRepository,
+    PostApprovalRepository,
+    PostEventRepository,
+    PostFlagRepository,
+    PostReplacementRepository,
+    PostVersionRepository,
+    PostVoteRepository,
+    UserRepository,
+)
 from .files import FileRepository
 from .coverage import EnrichmentCoverageRepository
 from .imports import ImportRepository
@@ -40,6 +54,18 @@ class Store:
         self.files = FileRepository(database)
         self.pools = CollectionRepository(database, kind=CollectionKind.POOL)
         self.sets = CollectionRepository(database, kind=CollectionKind.SET)
+        self.users = UserRepository(database)
+        self.artists = ArtistRepository(database)
+        self.comments = CommentRepository(database)
+        self.notes = NoteRepository(database)
+        self.note_versions = NoteVersionRepository(database)
+        self.favorites = FavoriteRepository(database)
+        self.post_votes = PostVoteRepository(database)
+        self.post_flags = PostFlagRepository(database)
+        self.post_events = PostEventRepository(database)
+        self.post_versions = PostVersionRepository(database)
+        self.post_replacements = PostReplacementRepository(database)
+        self.post_approvals = PostApprovalRepository(database)
         self.coverage = EnrichmentCoverageRepository(database)
         self.queue = QueueRepository(database)
         self.imports = ImportRepository(database, self.search)

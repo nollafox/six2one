@@ -9,7 +9,7 @@ from tests.factories import post_payload
 from tests.support import initialized_config
 
 
-def test_queue_without_limit_materializes_every_page(tmp_path: Path):
+def test_queue_without_limit_queues_page_discovery_without_calling_e621(tmp_path: Path):
     config = initialized_config(tmp_path)
     e621 = _PagedE621(total_posts=321)
 
@@ -18,12 +18,13 @@ def test_queue_without_limit_materializes_every_page(tmp_path: Path):
     with open_storage(config.storage_path, read_only=True) as storage:
         post_ids = storage.posts.list_ids()
 
-    assert result.summary.cached_posts == 321
-    assert len(post_ids) == 321
-    assert e621.posts.requested_limits == [320]
+    assert result.summary.cached_posts == 0
+    assert result.summary.page_jobs == 1
+    assert len(post_ids) == 0
+    assert e621.posts.requested_limits == []
 
 
-def test_queue_with_limit_caps_materialized_posts(tmp_path: Path):
+def test_queue_with_limit_queues_capped_page_discovery(tmp_path: Path):
     config = initialized_config(tmp_path)
     e621 = _PagedE621(total_posts=321)
 
@@ -32,9 +33,10 @@ def test_queue_with_limit_caps_materialized_posts(tmp_path: Path):
     with open_storage(config.storage_path, read_only=True) as storage:
         post_ids = storage.posts.list_ids()
 
-    assert result.summary.cached_posts == 10
-    assert len(post_ids) == 10
-    assert e621.posts.requested_limits == [10]
+    assert result.summary.cached_posts == 0
+    assert result.summary.page_jobs == 1
+    assert len(post_ids) == 0
+    assert e621.posts.requested_limits == []
 
 
 def test_queue_with_zero_limit_does_not_call_e621(tmp_path: Path):

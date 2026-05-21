@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from six2one.e621 import E621Client
-from six2one.queue.models import JobState
+from six2one.queue.models import JobKind, JobState
 from six2one.storage import open_storage
 from six2one.storage.models import SourceRunId
 
@@ -69,6 +69,10 @@ class FetchQueueResult:
     retry_failed: bool = False
     watch: bool = False
     active_source_runs: int = 0
+    pending_jobs: int = 0
+    failed_jobs: int = 0
+    pending_enrichment_jobs: int = 0
+    failed_enrichment_jobs: int = 0
     pending_image_jobs: int = 0
     failed_image_jobs: int = 0
     failed_jobs_restored: int = 0
@@ -110,6 +114,7 @@ def run_fetch(
     limit: int | None = None,
     e621: Any | None = None,
     backend: Any | None = None,
+    progress: Any | None = None,
 ) -> FetchCommandResult:
     """Discover/cache posts, enqueue jobs, and run them for this source run."""
 
@@ -129,6 +134,7 @@ def run_fetch(
         limit=limit,
         e621=client,
         backend=backend,
+        progress=progress,
     )
     if queued.source_run_id is None:
         return _from_queue_result(queued, download=FetchDownloadSummary(), completed=True)
@@ -161,6 +167,7 @@ def run_fetch_queue(
     watch: bool = False,
     e621: Any | None = None,
     backend: Any | None = None,
+    progress: Any | None = None,
     poll_interval_seconds: float = 2.0,
     max_idle_polls: int | None = None,
 ) -> FetchQueueResult:
@@ -175,7 +182,7 @@ def run_fetch_queue(
 
     client = e621 or _create_e621_client(config)
     with open_storage(config.storage_path) as storage:
-        active_runs, pending, failed = _queue_counts(storage)
+        active_runs, pending, failed, pending_all, failed_all, pending_enrichment, failed_enrichment = _queue_counts(storage)
         summary = _drain_queue(
             storage=storage,
             client=client,
@@ -184,12 +191,17 @@ def run_fetch_queue(
             watch=watch,
             poll_interval_seconds=poll_interval_seconds,
             max_idle_polls=max_idle_polls,
+            progress=progress,
         )
 
     return FetchQueueResult(
         retry_failed=retry_failed,
         watch=watch,
         active_source_runs=active_runs,
+        pending_jobs=pending_all,
+        failed_jobs=failed_all,
+        pending_enrichment_jobs=pending_enrichment,
+        failed_enrichment_jobs=failed_enrichment,
         pending_image_jobs=pending,
         failed_image_jobs=max(0, failed - summary.restored_failed_jobs + summary.failed_image_jobs),
         failed_jobs_restored=summary.restored_failed_jobs if retry_failed else 0,
@@ -230,6 +242,7 @@ def _drain_queue(
     watch: bool,
     poll_interval_seconds: float,
     max_idle_polls: int | None,
+    progress: Any | None,
 ) -> _QueueDrainSummary:
     totals = {
         "downloaded_images": 0,
@@ -245,7 +258,7 @@ def _drain_queue(
 
     try:
         while True:
-            summary = run_jobs(storage=storage, e621=client, retry_failed=retry_failed, image_only=False, settings=config)
+            summary = run_jobs(storage=storage, e621=client, retry_failed=retry_failed, image_only=False, settings=config, progress=progress)
             totals["downloaded_images"] += summary.downloaded_images
             totals["failed_image_jobs"] += summary.failed_image_jobs
             totals["skipped_existing_files"] += summary.skipped_existing_files
@@ -305,9 +318,38 @@ def _active_source_runs(storage) -> int:
     return len({job.source_run_id for job in jobs if job.source_run_id})
 
 
-def _queue_counts(storage) -> tuple[int, int, int]:
+def _queue_counts(storage) -> tuple[int, int, int, int, int, int, int]:
+    jobs = storage.queue.list(states=(JobState.READY, JobState.LEASED, JobState.FAILED))
+    enrichment_jobs = [job for job in jobs if job.kind in _ENRICHMENT_JOB_KINDS]
     return (
         _active_source_runs(storage),
         _pending_image_jobs(storage, source_run_id=None),
         _failed_image_jobs(storage, source_run_id=None),
+        sum(1 for job in jobs if job.state in {JobState.READY, JobState.LEASED}),
+        sum(1 for job in jobs if job.state is JobState.FAILED),
+        sum(1 for job in enrichment_jobs if job.state in {JobState.READY, JobState.LEASED}),
+        sum(1 for job in enrichment_jobs if job.state is JobState.FAILED),
     )
+
+
+_ENRICHMENT_JOB_KINDS = frozenset(
+    (
+        JobKind.ENRICH_POSTS,
+        JobKind.ENRICH_USERS,
+        JobKind.ENRICH_COMMENTS,
+        JobKind.ENRICH_NOTES,
+        JobKind.ENRICH_NOTE_VERSIONS,
+        JobKind.ENRICH_POST_FLAGS,
+        JobKind.ENRICH_POST_EVENTS,
+        JobKind.ENRICH_POST_VERSIONS,
+        JobKind.ENRICH_POST_APPROVALS,
+        JobKind.ENRICH_POOLS,
+        JobKind.ENRICH_SETS,
+        JobKind.ENRICH_REPLACEMENTS,
+        JobKind.ENRICH_FAVORITES,
+        JobKind.ENRICH_POST_VOTES,
+        JobKind.ENRICH_ARTISTS,
+        JobKind.ENRICH_ARTIST_URLS,
+        JobKind.ENRICH_ARTIST_VERSIONS,
+    )
+)

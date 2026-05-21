@@ -46,8 +46,7 @@ def test_default_fetch_evaluate_download_pipeline(store, fake_e621, tmp_path):
     registry = default_registry()
     run = store.source_runs.start(query="dragon rating:s")
     queue = Queue(store, registry)
-    queue.enqueue(JobKind.FETCH_PAGE, {"query": "dragon rating:s", "page": 1, "limit": 2}, source_run_id=run.id)
-    queue.enqueue(JobKind.EVALUATE_QUERY, {"download": True, "destination": str(tmp_path / "images"), "source_run_id": run.id, "post_ids": [1, 2], "image_variant": "original"}, source_run_id=run.id)
+    queue.enqueue(JobKind.FETCH_PAGE, {"query": "dragon rating:s", "page": 1, "limit": 2, "destination": str(tmp_path / "images")}, source_run_id=run.id)
 
     runner = QueueRunner(store, registry, JobContext(store=store, e621=fake_e621), worker_id="test")
     ran = runner.run_until_empty(max_jobs=10)
@@ -64,12 +63,7 @@ def test_evaluate_query_can_queue_sample_variant(store, fake_e621, tmp_path):
     registry = default_registry()
     run = store.source_runs.start(query="dragon rating:s")
     queue = Queue(store, registry)
-    queue.enqueue(JobKind.FETCH_PAGE, {"query": "dragon rating:s", "page": 1, "limit": 2}, source_run_id=run.id)
-    queue.enqueue(
-        JobKind.EVALUATE_QUERY,
-        {"download": True, "destination": str(tmp_path / "images"), "source_run_id": run.id, "post_ids": [1, 2], "image_variant": "sample"},
-        source_run_id=run.id,
-    )
+    queue.enqueue(JobKind.FETCH_PAGE, {"query": "dragon rating:s", "page": 1, "limit": 2, "destination": str(tmp_path / "images"), "image_variant": "sample"}, source_run_id=run.id)
 
     runner = QueueRunner(store, registry, JobContext(store=store, e621=fake_e621), worker_id="test")
     runner.run_until_empty(max_jobs=10)

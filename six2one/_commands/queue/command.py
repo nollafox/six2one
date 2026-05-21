@@ -29,6 +29,7 @@ class QueueRunSummary:
 
     discovered_pages: int | None = None
     cached_posts: int = 0
+    page_jobs: int = 0
     new_image_jobs: int = 0
     already_queued: int = 0
     already_downloaded: int = 0
@@ -51,7 +52,7 @@ class QueueCommandResult:
 
     @property
     def queued_anything(self) -> bool:
-        return self.summary.new_image_jobs > 0 or self.summary.enrichment_jobs > 0
+        return self.summary.page_jobs > 0 or self.summary.new_image_jobs > 0 or self.summary.enrichment_jobs > 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,10 @@ class QueueStatus:
     """Top-level queue counts for `621 queue list`."""
 
     active_source_runs: int = 0
+    pending_jobs: int = 0
+    failed_jobs: int = 0
+    pending_enrichment_jobs: int = 0
+    failed_enrichment_jobs: int = 0
     pending_image_jobs: int = 0
     failed_image_jobs: int = 0
     downloaded_images: int = 0
@@ -77,6 +82,8 @@ class SourceRunQueueSummary:
     cached_posts: int = 0
     pending_image_jobs: int = 0
     failed_image_jobs: int = 0
+    pending_enrichment_jobs: int = 0
+    failed_enrichment_jobs: int = 0
     downloaded_images: int = 0
     removed_image_jobs: int = 0
     pending_jobs: int = 0
@@ -171,6 +178,7 @@ def run_queue(
     limit: int | None = None,
     e621: Any | None = None,
     backend: Any | None = None,
+    progress: Any | None = None,
 ) -> QueueCommandResult:
     """Discover/cache matching posts and enqueue enrichment + image jobs."""
 
@@ -191,6 +199,7 @@ def run_queue(
             query=query,
             image_variant=image_variant or config.default_image_variant,
             limit=limit,
+            progress=progress,
         )
 
     return QueueCommandResult(
@@ -202,6 +211,7 @@ def run_queue(
         summary=QueueRunSummary(
             discovered_pages=plan.counts.discovered_pages,
             cached_posts=plan.counts.cached_posts,
+            page_jobs=plan.counts.page_jobs,
             new_image_jobs=plan.counts.new_image_jobs,
             already_queued=plan.counts.already_queued,
             already_downloaded=plan.counts.already_downloaded,
@@ -372,6 +382,7 @@ def _create_e621_client(config: SixTwoOneConfig) -> E621Client:
 def _queue_list_from_storage(storage, *, failed: bool, compact: bool) -> QueueListResult:
     jobs = storage.queue.list()
     image_jobs = [job for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS]
+    enrichment_jobs = [job for job in jobs if job.kind in _ENRICHMENT_JOB_KINDS]
     source_runs = storage.source_runs.list()
     active_source_ids = {
         job.source_run_id
@@ -387,6 +398,10 @@ def _queue_list_from_storage(storage, *, failed: bool, compact: bool) -> QueueLi
     failed_runs = tuple(group for group in failed_runs if group.jobs)
     status = QueueStatus(
         active_source_runs=len(active_source_ids),
+        pending_jobs=sum(1 for job in jobs if job.state in {JobState.READY, JobState.LEASED}),
+        failed_jobs=sum(1 for job in jobs if job.state is JobState.FAILED),
+        pending_enrichment_jobs=sum(1 for job in enrichment_jobs if job.state in {JobState.READY, JobState.LEASED}),
+        failed_enrichment_jobs=sum(1 for job in enrichment_jobs if job.state is JobState.FAILED),
         pending_image_jobs=sum(1 for job in image_jobs if job.state in {JobState.READY, JobState.LEASED}),
         failed_image_jobs=sum(1 for job in image_jobs if job.state is JobState.FAILED),
         downloaded_images=_downloaded_image_count(storage),
@@ -406,8 +421,11 @@ def _source_run_summary(storage, source_run_id: str | int | SourceRunId | None) 
         return None
     jobs = storage.queue.list(source_run_id=run_id)
     image_jobs = [job for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS]
+    enrichment_jobs = [job for job in jobs if job.kind in _ENRICHMENT_JOB_KINDS]
     pending_image = sum(1 for job in image_jobs if job.state in {JobState.READY, JobState.LEASED})
     failed_image = sum(1 for job in image_jobs if job.state is JobState.FAILED)
+    pending_enrichment = sum(1 for job in enrichment_jobs if job.state in {JobState.READY, JobState.LEASED})
+    failed_enrichment = sum(1 for job in enrichment_jobs if job.state is JobState.FAILED)
     downloaded = sum(1 for job in image_jobs if job.state is JobState.DONE)
     pending_jobs = sum(1 for job in jobs if job.state in {JobState.READY, JobState.LEASED})
     failed_jobs = sum(1 for job in jobs if job.state is JobState.FAILED)
@@ -424,6 +442,8 @@ def _source_run_summary(storage, source_run_id: str | int | SourceRunId | None) 
         cached_posts=run.total_candidates or 0,
         pending_image_jobs=pending_image,
         failed_image_jobs=failed_image,
+        pending_enrichment_jobs=pending_enrichment,
+        failed_enrichment_jobs=failed_enrichment,
         downloaded_images=downloaded,
         pending_jobs=pending_jobs,
         failed_jobs=failed_jobs,
@@ -476,3 +496,26 @@ def _amended_query(query: str, exclude: str) -> str:
 
 def _downloaded_image_count(storage) -> int:
     return storage.files.downloaded_count()
+
+
+_ENRICHMENT_JOB_KINDS = frozenset(
+    (
+        JobKind.ENRICH_POSTS,
+        JobKind.ENRICH_USERS,
+        JobKind.ENRICH_COMMENTS,
+        JobKind.ENRICH_NOTES,
+        JobKind.ENRICH_NOTE_VERSIONS,
+        JobKind.ENRICH_POST_FLAGS,
+        JobKind.ENRICH_POST_EVENTS,
+        JobKind.ENRICH_POST_VERSIONS,
+        JobKind.ENRICH_POST_APPROVALS,
+        JobKind.ENRICH_POOLS,
+        JobKind.ENRICH_SETS,
+        JobKind.ENRICH_REPLACEMENTS,
+        JobKind.ENRICH_FAVORITES,
+        JobKind.ENRICH_POST_VOTES,
+        JobKind.ENRICH_ARTISTS,
+        JobKind.ENRICH_ARTIST_URLS,
+        JobKind.ENRICH_ARTIST_VERSIONS,
+    )
+)

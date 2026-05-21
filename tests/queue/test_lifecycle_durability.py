@@ -105,3 +105,51 @@ def test_run_jobs_does_not_drain_unrelated_source_run(store, fake_e621, tmp_path
 
     assert summary.completed_jobs == 1
     assert store.queue.get(other).state is JobState.READY
+
+
+def test_run_jobs_reports_progress_when_work_is_found(store, fake_e621, tmp_path):
+    source = store.source_runs.start(query="dragon")
+    store.queue.enqueue(
+        JobKind.DOWNLOAD_ORIGINAL,
+        {"post_id": 1, "variant": "original", "source_url": "https://static.example/1.png", "destination": str(tmp_path / "1.png")},
+        source_run_id=source.id,
+    )
+    progress = _ProgressSpy()
+
+    summary = run_jobs(storage=store, e621=fake_e621, source_run_id=source.id, progress=progress)
+
+    assert summary.completed_jobs == 1
+    assert {call["desc"] for call in progress.calls} == {"Processing queued jobs"}
+    assert progress.bars[0].updates == [1]
+
+
+class _ProgressSpy:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.bars: list[_ProgressBarSpy] = []
+
+    def __call__(self, iterable=None, **kwargs):
+        self.calls.append(kwargs)
+        if iterable is not None:
+            return iterable
+        bar = _ProgressBarSpy()
+        self.bars.append(bar)
+        return bar
+
+
+class _ProgressBarSpy:
+    def __init__(self) -> None:
+        self.updates: list[int] = []
+        self.total = None
+
+    def update(self, count):
+        self.updates.append(count)
+
+    def set_description_str(self, _desc):
+        return None
+
+    def refresh(self):
+        return None
+
+    def close(self):
+        return None

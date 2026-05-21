@@ -40,6 +40,7 @@ def run_jobs(
     image_only: bool = False,
     max_jobs: int | None = None,
     settings: Any | None = None,
+    progress: Any | None = None,
 ) -> RunJobsSummary:
     """Run queued jobs.
 
@@ -60,49 +61,62 @@ def run_jobs(
     attempted = 0
     completed_ids: list[str] = []
     failed_ids: list[str] = []
+    bar = None
 
-    while max_jobs is None or attempted < max_jobs:
-        records = _runnable_jobs(storage, source_run_id=source_run_id, retry_failed=retry_failed, image_only=image_only)
-        if not records:
-            break
+    try:
+        while max_jobs is None or attempted < max_jobs:
+            records = _runnable_jobs(storage, source_run_id=source_run_id, retry_failed=retry_failed, image_only=image_only)
+            if not records:
+                break
 
-        record = records[0]
-        attempted += 1
-        if record.state is JobState.FAILED and retry_failed:
-            restored += 1
-        _mark_running(storage, record.id)
-        refreshed = storage.queue.get(record.id)
-        if refreshed is not None:
-            record = refreshed
+            if bar is None and progress is not None:
+                total = len(records) if max_jobs is None else min(len(records), max_jobs)
+                bar = progress(None, desc="Processing queued jobs", total=total, unit="job", leave=False)
+            elif bar is not None:
+                _progress_set_total(bar, attempted + len(records))
 
-        job = registry.create(record.kind)
-        try:
-            result = job.run(context, **record.payload)
-            queue = Queue(storage, registry)
-            for requested in result.enqueue:
-                queue.enqueue(
-                    requested.kind,
-                    requested.payload,
-                    source_run_id=requested.source_run_id or record.source_run_id,
-                    priority=requested.priority,
-                    max_attempts=requested.max_attempts,
-                    metadata=requested.metadata,
-                )
-            storage.queue.complete(record.id, metadata=result.metadata, message=result.message)
-            completed += 1
-            completed_ids.append(record.id)
-            if record.kind in _DOWNLOAD_JOB_KINDS:
-                downloaded += 1
-                byte_value = result.metadata.get("bytes") if isinstance(result.metadata, dict) else None
-                if isinstance(byte_value, int):
-                    bytes_written += byte_value
-        except Exception as error:  # pragma: no cover - exercised by integration failures
-            message = "".join(traceback.format_exception_only(type(error), error)).strip()
-            storage.queue.fail(record.id, message)
-            failed += 1
-            failed_ids.append(record.id)
-            if record.kind in _DOWNLOAD_JOB_KINDS:
-                failed_images += 1
+            record = records[0]
+            attempted += 1
+            _progress_set_description(bar, f"Running {record.kind.name.lower()}")
+            if record.state is JobState.FAILED and retry_failed:
+                restored += 1
+            _mark_running(storage, record.id)
+            refreshed = storage.queue.get(record.id)
+            if refreshed is not None:
+                record = refreshed
+
+            job = registry.create(record.kind)
+            try:
+                result = job.run(context, **record.payload)
+                queue = Queue(storage, registry)
+                for requested in result.enqueue:
+                    queue.enqueue(
+                        requested.kind,
+                        requested.payload,
+                        source_run_id=requested.source_run_id or record.source_run_id,
+                        priority=requested.priority,
+                        max_attempts=requested.max_attempts,
+                        metadata=requested.metadata,
+                    )
+                storage.queue.complete(record.id, metadata=result.metadata, message=result.message)
+                completed += 1
+                completed_ids.append(record.id)
+                if record.kind in _DOWNLOAD_JOB_KINDS:
+                    downloaded += 1
+                    byte_value = result.metadata.get("bytes") if isinstance(result.metadata, dict) else None
+                    if isinstance(byte_value, int):
+                        bytes_written += byte_value
+            except Exception as error:  # pragma: no cover - exercised by integration failures
+                message = "".join(traceback.format_exception_only(type(error), error)).strip()
+                storage.queue.fail(record.id, message)
+                failed += 1
+                failed_ids.append(record.id)
+                if record.kind in _DOWNLOAD_JOB_KINDS:
+                    failed_images += 1
+            finally:
+                _progress_update(bar)
+    finally:
+        _progress_close(bar)
 
     return RunJobsSummary(
         completed_jobs=completed,
@@ -137,6 +151,37 @@ def _runnable_jobs(
 
 def _mark_running(storage: Storage, job_id) -> None:
     storage.queue.mark_leased(job_id, worker_id="command", lease_for=timedelta(minutes=10))
+
+
+def _progress_update(bar: Any | None, amount: int = 1) -> None:
+    if bar is not None and hasattr(bar, "update"):
+        bar.update(amount)
+
+
+def _progress_close(bar: Any | None) -> None:
+    if bar is not None and hasattr(bar, "close"):
+        bar.close()
+
+
+def _progress_set_description(bar: Any | None, desc: str) -> None:
+    if bar is None:
+        return
+    if hasattr(bar, "set_description_str"):
+        bar.set_description_str(desc)
+    elif hasattr(bar, "set_description"):
+        bar.set_description(desc)
+    if hasattr(bar, "refresh"):
+        bar.refresh()
+
+
+def _progress_set_total(bar: Any | None, total: int) -> None:
+    if bar is None or not hasattr(bar, "total"):
+        return
+    current = getattr(bar, "total")
+    if current is None or int(current) < total:
+        bar.total = total
+        if hasattr(bar, "refresh"):
+            bar.refresh()
 
 
 def human_bytes(size: int) -> str:

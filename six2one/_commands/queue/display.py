@@ -29,6 +29,8 @@ def format_queue_result(result: QueueCommandResult) -> str:
         "Phase 1/1: Discovering posts",
         _field("pages", pages),
         _field("cached post JSON", _n(summary.cached_posts)),
+        _field("page discovery jobs", _n(summary.page_jobs)),
+        _field("enrichment jobs", _n(summary.enrichment_jobs)),
         _field("new image jobs", _n(summary.new_image_jobs)),
         _field("already queued", _n(summary.already_queued)),
         _field("already downloaded", _n(summary.already_downloaded)),
@@ -44,8 +46,10 @@ def format_queue_result(result: QueueCommandResult) -> str:
         _field("Query", result.query),
         _field("Discovered pages", _n(summary.discovered_pages)),
         _field("Cached posts", _n(summary.cached_posts)),
+        _field("Page discovery jobs", _n(summary.page_jobs)),
     ])
     if result.queued_anything:
+        lines.append(_field("Enrichment jobs queued", _n(summary.enrichment_jobs)))
         lines.append(_field("Images queued", _n(summary.new_image_jobs)))
         if summary.already_queued:
             lines.append(_field("Already queued", _n(summary.already_queued)))
@@ -75,7 +79,11 @@ def _format_full(result: QueueListResult) -> str:
         "",
         "Status",
         _field("Active source runs", _n(status.active_source_runs)),
+        _field("Pending jobs", _n(status.pending_jobs)),
+        _field("Pending enrichment jobs", _n(status.pending_enrichment_jobs)),
         _field("Pending image jobs", _n(status.pending_image_jobs)),
+        _field("Failed jobs", _n(status.failed_jobs)),
+        _field("Failed enrichment jobs", _n(status.failed_enrichment_jobs)),
         _field("Failed image jobs", _n(status.failed_image_jobs)),
         _field("Downloaded images", _n(status.downloaded_images)),
         _field("Cached post JSON", _n(status.cached_post_json)),
@@ -92,7 +100,7 @@ def _format_full(result: QueueListResult) -> str:
     lines.extend([
         "",
         "Note",
-        "  Active source runs are runs with pending, failed, or in-progress image jobs.",
+        "  Active source runs are runs with pending, failed, or in-progress queue jobs.",
         "  Completed historical runs remain in local storage for fetch and export reuse.",
         "",
         "Next",
@@ -119,7 +127,11 @@ def _format_run(index: int, run: SourceRunQueueSummary) -> list[str]:
         _field("state", run.state, width=27),
         _field("discovered pages", pages, width=27),
         _field("cached posts", _n(run.cached_posts), width=27),
+        _field("pending jobs", _n(run.pending_jobs), width=27),
+        _field("pending enrichment jobs", _n(run.pending_enrichment_jobs), width=27),
         _field("pending image jobs", _n(run.pending_image_jobs), width=27),
+        _field("failed jobs", _n(run.failed_jobs), width=27),
+        _field("failed enrichment jobs", _n(run.failed_enrichment_jobs), width=27),
         _field("failed image jobs", _n(run.failed_image_jobs), width=27),
         _field("downloaded images", _n(run.downloaded_images), width=27),
         _field("removed image jobs", _n(run.removed_image_jobs), width=27),
@@ -132,11 +144,11 @@ def _format_run(index: int, run: SourceRunQueueSummary) -> list[str]:
 
 
 def _format_compact(result: QueueListResult) -> str:
-    lines = [f"{'ID':<17} {'State':<12} {'Query':<44} {'Pending':>8} {'Failed':>8} {'Done':>8} Pages"]
+    lines = [f"{'ID':<17} {'State':<12} {'Query':<44} {'Pending':>8} {'Enrich':>8} {'Images':>8} {'Failed':>8} {'Done':>8} Pages"]
     for run in result.runs:
         pages = "n/a" if run.discovered_pages is None else f"{run.discovered_pages} discovered"
         query = run.query if len(run.query) <= 44 else run.query[:41] + "..."
-        lines.append(f"{run.id:<17} {run.state:<12} {query:<44} {run.pending_image_jobs:>8,} {run.failed_image_jobs:>8,} {run.downloaded_images:>8,} {pages}")
+        lines.append(f"{run.id:<17} {run.state:<12} {query:<44} {run.pending_jobs:>8,} {run.pending_enrichment_jobs:>8,} {run.pending_image_jobs:>8,} {run.failed_jobs:>8,} {run.downloaded_images:>8,} {pages}")
     return "\n".join(lines)
 
 

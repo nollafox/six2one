@@ -33,9 +33,16 @@ def test_queue_source_run_keeps_raw_query_and_bound_canonical_metadata(tmp_path:
 def test_queue_clear_uses_alias_and_implication_semantics_not_query_strings(tmp_path: Path):
     config = _initialize_tagged_storage(tmp_path)
     e621 = FakeE621(posts=[post_payload(1, tag="tabby_cat"), post_payload(2, tag="wolf")])
+    with open_storage(config.storage_path) as storage:
+        storage.imports.import_posts([post_payload(1, tag="tabby_cat")])
 
     queued = run_queue(config, "domestic_cat rating:s", limit=2, e621=e621)
     with open_storage(config.storage_path) as storage:
+        storage.queue.enqueue(
+            JobKind.DOWNLOAD_ORIGINAL,
+            {"post_id": 1, "variant": "original", "destination": "cat.png"},
+            source_run_id=queued.source_run_id,
+        )
         storage.queue.enqueue(
             JobKind.DOWNLOAD_ORIGINAL,
             {"post_id": 2, "variant": "original", "destination": "wolf.png"},
@@ -44,7 +51,7 @@ def test_queue_clear_uses_alias_and_implication_semantics_not_query_strings(tmp_
     result = run_queue_clear(config, target="cat", yes=True)
 
     with open_storage(config.storage_path, read_only=True) as storage:
-        jobs = {int(job.payload["post_id"]): job for job in storage.queue.list(source_run_id=queued.source_run_id)}
+        jobs = {int(job.payload["post_id"]): job for job in storage.queue.list(source_run_id=queued.source_run_id) if "post_id" in job.payload}
 
     assert result.pending_removed == 1
     assert jobs[1].state is JobState.CANCELLED
@@ -54,19 +61,29 @@ def test_queue_clear_uses_alias_and_implication_semantics_not_query_strings(tmp_
 def test_queue_enqueues_missing_images_for_local_matches_beyond_e621_page(tmp_path: Path):
     config = _initialize_tagged_storage(tmp_path)
     e621 = FakeE621(posts=[post_payload(1, tag="dragon")])
+    progress = _ProgressSpy()
     with open_storage(config.storage_path) as storage:
         storage.imports.import_posts([post_payload(2, tag="dragon")])
 
-    result = run_queue(config, "dragon rating:s", limit=1, e621=e621)
+    result = run_queue(config, "dragon rating:s", limit=1, e621=e621, progress=progress)
 
     with open_storage(config.storage_path, read_only=True) as storage:
         jobs = storage.queue.list(source_run_id=result.source_run_id)
 
-    queued_post_ids = {int(job.payload["post_id"]) for job in jobs if job.kind is JobKind.DOWNLOAD_ORIGINAL}
-    assert e621.posts.calls == [("dragon rating:s", 1, None)]
-    assert result.summary.cached_posts == 2
-    assert result.summary.new_image_jobs == 2
-    assert queued_post_ids == {1, 2}
+    job_kinds = {job.kind for job in jobs}
+    progress_descriptions = {call["desc"] for call in progress.calls}
+    assert e621.posts.calls == []
+    assert result.summary.cached_posts == 1
+    assert result.summary.page_jobs == 1
+    assert result.summary.new_image_jobs == 0
+    assert JobKind.FETCH_PAGE in job_kinds
+    assert JobKind.EVALUATE_QUERY in job_kinds
+    assert progress_descriptions >= {
+        "Planning queued query",
+        "Caching remote posts",
+        "Caching remote posts",
+        "Queueing enrichment jobs",
+    }
 
 
 def test_queue_skips_downloaded_local_matches_beyond_e621_page(tmp_path: Path):
@@ -84,11 +101,13 @@ def test_queue_skips_downloaded_local_matches_beyond_e621_page(tmp_path: Path):
     with open_storage(config.storage_path, read_only=True) as storage:
         jobs = storage.queue.list(source_run_id=result.source_run_id)
 
-    queued_post_ids = {int(job.payload["post_id"]) for job in jobs if job.kind is JobKind.DOWNLOAD_ORIGINAL}
-    assert result.summary.cached_posts == 2
-    assert result.summary.new_image_jobs == 1
+    job_kinds = {job.kind for job in jobs}
+    assert result.summary.cached_posts == 1
+    assert result.summary.page_jobs == 1
+    assert result.summary.new_image_jobs == 0
     assert result.summary.already_downloaded == 1
-    assert queued_post_ids == {1}
+    assert JobKind.FETCH_PAGE in job_kinds
+    assert JobKind.EVALUATE_QUERY in job_kinds
 
 
 def test_preview_and_sample_payloads_do_not_reuse_original_checksum():
@@ -124,3 +143,36 @@ def _initialize_tagged_storage(tmp_path: Path):
             export_date="2026-05-18",
         )
     return config
+
+
+class _ProgressSpy:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def __call__(self, iterable=None, **kwargs):
+        self.calls.append(kwargs)
+        if iterable is None:
+            return _ProgressBarSpy()
+        return iterable
+
+
+class _ProgressBarSpy:
+    total = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+    def update(self, _count):
+        return None
+
+    def set_description_str(self, _desc):
+        return None
+
+    def refresh(self):
+        return None
+
+    def close(self):
+        return None

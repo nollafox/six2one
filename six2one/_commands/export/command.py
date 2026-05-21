@@ -11,7 +11,7 @@ from six2one.storage import open_storage
 from six2one.storage.models import PostLoad
 
 from six2one._commands.config import SixTwoOneConfig
-from six2one._commands.queue.planning import _dependency_kind, _enqueue_enrichment_jobs, compile_query
+from six2one._commands.queue.planning import _dependency_kind, _enqueue_enrichment_jobs, _user_lookups, compile_query
 from six2one._commands.queue.runtime import run_jobs
 
 
@@ -58,6 +58,7 @@ def run_export(
                 dependencies=dependencies,
                 post_ids=candidate_ids,
                 stored_posts=(),
+                user_lookups=_user_lookups(compiled),
             )
             if enrichment_jobs:
                 summary = run_jobs(storage=storage, e621=client, source_run_id=source_run.id, settings=config)

@@ -1032,17 +1032,24 @@ def _relation_clause(node: RelationPredicate) -> tuple[str, tuple[object, ...]]:
 
 
 def _user_clause(node: UserPredicate) -> tuple[str, tuple[object, ...]]:
-    value = getattr(node.user, "value", None)
-    if value is None:
-        value = getattr(node.user, "id", None)
+    user_id = getattr(node.user, "id", None)
+    user_name = getattr(node.user, "name", None)
+    if user_name is not None:
+        value_clause = "(SELECT user_id FROM users WHERE normalized_name = ?)"
+        values = (str(user_name).strip().lower(),)
+    else:
+        if user_id is None:
+            raise IndexRebuildRequired(f"Current-user metatag requires authenticated viewer resolution: {node.metatag.value}")
+        value_clause = "?"
+        values = (int(user_id),)
     if node.metatag in {UserMetatag.USER, UserMetatag.USER_ID}:
-        return "p.uploader_id = ?", (int(value),)
+        return f"p.uploader_id = {value_clause}", values
     if node.metatag is UserMetatag.APPROVER:
-        return "p.approver_id = ?", (int(value),)
+        return f"p.approver_id = {value_clause}", values
     if node.metatag in {UserMetatag.FAV, UserMetatag.FAVORITEDBY}:
-        return "EXISTS (SELECT 1 FROM favorites f WHERE f.post_id = p.post_id AND f.user_id = ?)", (int(value),)
+        return f"EXISTS (SELECT 1 FROM favorites f WHERE f.post_id = p.post_id AND f.user_id = {value_clause})", values
     if node.metatag in {UserMetatag.COMMENTER, UserMetatag.COMM}:
-        return "EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.post_id AND c.user_id = ?)", (int(value),)
+        return f"EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.post_id AND c.user_id = {value_clause})", values
     if node.metatag in {UserMetatag.NOTER, UserMetatag.NOTEUPDATER}:
-        return "EXISTS (SELECT 1 FROM notes n WHERE n.post_id = p.post_id AND n.user_id = ?)", (int(value),)
+        return f"EXISTS (SELECT 1 FROM notes n WHERE n.post_id = p.post_id AND n.user_id = {value_clause})", values
     raise IndexRebuildRequired(f"User metatag is not indexed: {node.metatag.value}")

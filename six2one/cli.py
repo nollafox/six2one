@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import textwrap
 
+from tqdm import tqdm
+
 from ._commands.auth import AuthCommand
 from ._commands.bootstrap import BootstrapCommand
 from ._commands.explain import ExplainCommand
@@ -375,7 +377,7 @@ def _run_fetch_command(namespace: argparse.Namespace) -> int:
         if namespace.watch:
             sys.stdout.write("six2one fetch --queue --watch\n\nWatching for queued work. Press Ctrl-C to stop.\n\n")
             sys.stdout.flush()
-        result = run_fetch_queue(config, retry_failed=namespace.retry_failed, watch=namespace.watch)
+        result = run_fetch_queue(config, retry_failed=namespace.retry_failed, watch=namespace.watch, progress=tqdm)
         sys.stdout.write(format_fetch_queue_result(result) + "\n")
         return 0
 
@@ -385,6 +387,7 @@ def _run_fetch_command(namespace: argparse.Namespace) -> int:
         query,
         image_variant=namespace.image_variant,
         limit=_limit_from_value(namespace.limit),
+        progress=tqdm,
     )
     sys.stdout.write(format_fetch_result(result) + "\n")
     return 0
@@ -462,6 +465,7 @@ def _run_queue_command(namespace: argparse.Namespace) -> int:
         query,
         image_variant=namespace.image_variant,
         limit=_limit_from_value(namespace.limit),
+        progress=tqdm,
     )
     sys.stdout.write(format_queue_result(result) + "\n")
     return 0

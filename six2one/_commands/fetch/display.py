@@ -78,7 +78,11 @@ def format_fetch_queue_result(result: FetchQueueResult) -> str:
         "",
         "Queue",
         _field("Active source runs", _n(result.active_source_runs)),
+        _field("Pending jobs", _n(result.pending_jobs)),
+        _field("Pending enrichment jobs", _n(result.pending_enrichment_jobs)),
         _field("Pending image jobs", _n(result.pending_image_jobs)),
+        _field("Failed jobs", _n(result.failed_jobs)),
+        _field("Failed enrichment jobs", _n(result.failed_enrichment_jobs)),
         _field("Failed image jobs", _n(result.failed_image_jobs)),
         "",
     ]
@@ -87,7 +91,8 @@ def format_fetch_queue_result(result: FetchQueueResult) -> str:
     if result.retry_failed:
         lines.extend(["Retry", _field("Failed jobs restored", _n(result.failed_jobs_restored)), ""])
     lines.extend([
-        "Phase 1/1: Downloading queued images",
+        "Phase 1/1: Processing queued jobs",
+        _field("Jobs processed", _n(result.attempted_jobs)),
         _field("Downloaded", f"{_n(dl.downloaded)} / {_n(dl.total)}"),
         _field("Failed this run", _n(dl.failed_this_run)),
     ])
@@ -106,7 +111,7 @@ def format_fetch_queue_result(result: FetchQueueResult) -> str:
     lines.extend([
         _field("Images downloaded", _n(dl.downloaded)),
         _field("Failed image jobs", _n(result.failed_image_jobs + dl.failed_this_run if result.paused_after_error else dl.failed_this_run)),
-        _field("Remaining pending jobs", _n(max(result.pending_image_jobs - dl.downloaded, 0))),
+        _field("Remaining pending jobs", _n(max(result.pending_jobs - result.attempted_jobs, 0))),
         "",
         "Next",
         "  Inspect failed jobs:",

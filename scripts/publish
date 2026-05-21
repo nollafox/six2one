@@ -47,7 +47,8 @@ for path, (pattern, replacement) in replacements.items():
     path.write_text(updated, encoding="utf-8")
 PY
 
-poetry run python -m unittest discover -s tests
+poetry run pytest
+poetry run python -m compileall -q six2one
 poetry build
 poetry publish \
   --username __token__ \

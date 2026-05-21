@@ -8,7 +8,7 @@ from typing import Final
 
 DEFAULT_OUTPUT_DIR: Final = Path("./output")
 TOOL_NAME: Final = "six2one"
-TOOL_VERSION: Final = "0.3.0"
+TOOL_VERSION: Final = "0.3.1"
 
 
 class Site(str, Enum):

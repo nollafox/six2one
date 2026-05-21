@@ -53,8 +53,11 @@ def test_mirror_imports_query_relevant_exports_with_progress(tmp_path: Path):
         "Committing posts (1 accepted, 0 rejected)",
         "Finalizing post import",
         "Rebuilding indexes",
+        "Finalizing search index",
+        "Indexing SQL-backed search facts",
         "Writing search bitmaps",
         "Writing ordered indexes",
+        "Rebuilding text indexes",
         "Importing pools",
     }
     assert not (config.exports_dir / "posts-2026-05-18.csv.gz").exists()

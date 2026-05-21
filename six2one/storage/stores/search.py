@@ -124,16 +124,24 @@ class StreamingSearchIndexBuilder:
             self._add(BitmapKey("tag", int(tag_id)), post_id)
 
     def finish(self, *, progress: Any | None = None) -> IndexManifest:
-        buckets = self._build_bitmaps(progress=progress)
-        self._materialize_implications(buckets, progress=progress)
-        self.repository._add_sql_backed_bitmaps(buckets)
-        self.repository._write_bitmap_buckets(buckets, progress=progress)
-        self.repository._rebuild_ordered(progress=progress)
-        self.repository.rebuild_text_index()
-        manifest = self.repository._ready_manifest()
-        self.repository._write_manifest(manifest)
-        self.repository._record_manifest_generation(manifest)
-        return manifest
+        with _progress_bar(progress, desc="Finalizing search index", total=7, unit="phase") as bar:
+            buckets = self._build_bitmaps(progress=progress)
+            _progress_update(bar)
+            self._materialize_implications(buckets, progress=progress)
+            _progress_update(bar)
+            self.repository._add_sql_backed_bitmaps(buckets, progress=progress)
+            _progress_update(bar)
+            self.repository._write_bitmap_buckets(buckets, progress=progress)
+            _progress_update(bar)
+            self.repository._rebuild_ordered(progress=progress)
+            _progress_update(bar)
+            self.repository.rebuild_text_index(progress=progress)
+            _progress_update(bar)
+            manifest = self.repository._ready_manifest()
+            self.repository._write_manifest(manifest)
+            self.repository._record_manifest_generation(manifest)
+            _progress_update(bar)
+            return manifest
 
     def _add(self, key: BitmapKey, post_id: int) -> None:
         self._postings.setdefault(key, []).append(int(post_id))
@@ -205,13 +213,18 @@ class SearchRepository(BaseRepository):
         self._write_manifest(IndexManifest.empty())
         self._clear_lmdb(self.config.base_lmdb)
         self._clear_lmdb(self.config.delta_lmdb)
-        self._rebuild_bitmaps(progress=progress)
-        self._rebuild_ordered(progress=progress)
-        self.rebuild_text_index()
-        manifest = self._ready_manifest()
-        self._write_manifest(manifest)
-        self._record_manifest_generation(manifest)
-        return manifest
+        with _progress_bar(progress, desc="Rebuilding search index", total=4, unit="phase") as bar:
+            self._rebuild_bitmaps(progress=progress)
+            _progress_update(bar)
+            self._rebuild_ordered(progress=progress)
+            _progress_update(bar)
+            self.rebuild_text_index(progress=progress)
+            _progress_update(bar)
+            manifest = self._ready_manifest()
+            self._write_manifest(manifest)
+            self._record_manifest_generation(manifest)
+            _progress_update(bar)
+            return manifest
 
     def begin_stream_rebuild(self) -> StreamingSearchIndexBuilder:
         self.provision()
@@ -235,37 +248,50 @@ class SearchRepository(BaseRepository):
             path.unlink()
         return StreamingSearchIndexBuilder(self)
 
-    def rebuild_text_index(self) -> None:
+    def rebuild_text_index(self, *, progress: Any | None = None) -> None:
         self._validate_fts5_trigram()
         with self.database.write_if_needed():
-            self.database.execute("DELETE FROM post_descriptions_fts")
-            self.database.execute("DELETE FROM post_sources_fts")
-            self.database.execute("DELETE FROM post_notes_fts")
-            self.database.execute(
-                """
-                INSERT INTO post_descriptions_fts(rowid, post_id, description)
-                SELECT post_id, post_id, COALESCE(description, '')
-                FROM post_details
-                WHERE description IS NOT NULL AND description <> ''
-                """
-            )
-            self.database.execute(
-                """
-                INSERT INTO post_sources_fts(post_id, source_url)
-                SELECT e.post_id, s.source_url
-                FROM post_source_edges AS e
-                JOIN sources AS s ON s.source_id = e.source_id
-                """
-            )
-            self.database.execute(
-                """
-                INSERT INTO post_notes_fts(post_id, body)
-                SELECT n.post_id, COALESCE(t.body, '')
-                FROM notes AS n
-                JOIN note_text AS t ON t.note_id = n.note_id
-                WHERE t.body IS NOT NULL AND t.body <> ''
-                """
-            )
+            with _progress_bar(progress, desc="Rebuilding text indexes", total=6, unit="step", leave=False) as bar:
+                _progress_set_description(bar, "Clearing description text index")
+                self.database.execute("DELETE FROM post_descriptions_fts")
+                _progress_update(bar)
+                _progress_set_description(bar, "Clearing source text index")
+                self.database.execute("DELETE FROM post_sources_fts")
+                _progress_update(bar)
+                _progress_set_description(bar, "Clearing note text index")
+                self.database.execute("DELETE FROM post_notes_fts")
+                _progress_update(bar)
+                _progress_set_description(bar, "Writing description text index")
+                self.database.execute(
+                    """
+                    INSERT INTO post_descriptions_fts(rowid, post_id, description)
+                    SELECT post_id, post_id, COALESCE(description, '')
+                    FROM post_details
+                    WHERE description IS NOT NULL AND description <> ''
+                    """
+                )
+                _progress_update(bar)
+                _progress_set_description(bar, "Writing source text index")
+                self.database.execute(
+                    """
+                    INSERT INTO post_sources_fts(post_id, source_url)
+                    SELECT e.post_id, s.source_url
+                    FROM post_source_edges AS e
+                    JOIN sources AS s ON s.source_id = e.source_id
+                    """
+                )
+                _progress_update(bar)
+                _progress_set_description(bar, "Writing note text index")
+                self.database.execute(
+                    """
+                    INSERT INTO post_notes_fts(post_id, body)
+                    SELECT n.post_id, COALESCE(t.body, '')
+                    FROM notes AS n
+                    JOIN note_text AS t ON t.note_id = n.note_id
+                    WHERE t.body IS NOT NULL AND t.body <> ''
+                    """
+                )
+                _progress_update(bar)
 
     def index_post_ids(self, post_ids: Iterable[int]) -> None:
         ids = tuple(sorted({int(post_id) for post_id in post_ids}))
@@ -418,7 +444,7 @@ class SearchRepository(BaseRepository):
                 add(BitmapKey("tag", int(row["tag_id"])), int(row["post_id"]))
                 _progress_update(bar)
 
-        self._add_sql_backed_bitmaps(buckets)
+        self._add_sql_backed_bitmaps(buckets, progress=progress)
 
         self._write_bitmap_buckets(buckets, progress=progress)
 
@@ -439,22 +465,33 @@ class SearchRepository(BaseRepository):
         finally:
             store.close()
 
-    def _add_sql_backed_bitmaps(self, buckets: dict[BitmapKey, BitMap]) -> None:
+    def _add_sql_backed_bitmaps(self, buckets: dict[BitmapKey, BitMap], *, progress: Any | None = None) -> None:
         def add(key: BitmapKey, post_id: int) -> None:
             buckets.setdefault(key, BitMap()).add(int(post_id))
 
-        for row in self.database.raw_connection.execute("SELECT DISTINCT post_id FROM post_source_edges"):
-            add(BitmapKey("presence", "source"), int(row["post_id"]))
-        for row in self.database.raw_connection.execute("SELECT post_id FROM post_details WHERE description IS NOT NULL AND description <> ''"):
-            add(BitmapKey("presence", "description"), int(row["post_id"]))
-        for row in self.database.raw_connection.execute("SELECT DISTINCT post_id FROM collection_post_edges WHERE collection_kind_id = ?", (int(CollectionKind.POOL),)):
-            add(BitmapKey("presence", "pool"), int(row["post_id"]))
-        for row in self.database.raw_connection.execute("SELECT collection_kind_id, collection_id, post_id FROM collection_post_edges"):
-            prefix = "pool" if int(row["collection_kind_id"]) == int(CollectionKind.POOL) else "set"
-            add(BitmapKey(prefix, int(row["collection_id"])), int(row["post_id"]))
-        for table, key in (("comments", "comments"), ("notes", "notes"), ("favorites", "favorites"), ("post_votes", "votes")):
-            for row in self.database.raw_connection.execute(f"SELECT DISTINCT post_id FROM {table}"):
-                add(BitmapKey("presence", key), int(row["post_id"]))
+        with _progress_bar(progress, desc="Indexing SQL-backed search facts", total=8, unit="source", leave=False) as bar:
+            _progress_set_description(bar, "Indexing source presence")
+            for row in self.database.raw_connection.execute("SELECT DISTINCT post_id FROM post_source_edges"):
+                add(BitmapKey("presence", "source"), int(row["post_id"]))
+            _progress_update(bar)
+            _progress_set_description(bar, "Indexing description presence")
+            for row in self.database.raw_connection.execute("SELECT post_id FROM post_details WHERE description IS NOT NULL AND description <> ''"):
+                add(BitmapKey("presence", "description"), int(row["post_id"]))
+            _progress_update(bar)
+            _progress_set_description(bar, "Indexing pool presence")
+            for row in self.database.raw_connection.execute("SELECT DISTINCT post_id FROM collection_post_edges WHERE collection_kind_id = ?", (int(CollectionKind.POOL),)):
+                add(BitmapKey("presence", "pool"), int(row["post_id"]))
+            _progress_update(bar)
+            _progress_set_description(bar, "Indexing collection membership")
+            for row in self.database.raw_connection.execute("SELECT collection_kind_id, collection_id, post_id FROM collection_post_edges"):
+                prefix = "pool" if int(row["collection_kind_id"]) == int(CollectionKind.POOL) else "set"
+                add(BitmapKey(prefix, int(row["collection_id"])), int(row["post_id"]))
+            _progress_update(bar)
+            for table, key in (("comments", "comments"), ("notes", "notes"), ("favorites", "favorites"), ("post_votes", "votes")):
+                _progress_set_description(bar, f"Indexing {key} presence")
+                for row in self.database.raw_connection.execute(f"SELECT DISTINCT post_id FROM {table}"):
+                    add(BitmapKey("presence", key), int(row["post_id"]))
+                _progress_update(bar)
 
     def _rebuild_ordered(self, *, progress: Any | None = None) -> None:
         orderings = {
@@ -475,6 +512,7 @@ class SearchRepository(BaseRepository):
         }
         with _progress_bar(progress, desc="Writing ordered indexes", total=len(orderings), unit="index", leave=False) as bar:
             for name, sql in orderings.items():
+                _progress_set_description(bar, f"Writing ordered index {name}")
                 cursor = self.database.raw_connection.execute(sql)
                 self.ordered.write_ids(OrderedIndexKey(name), (int(row["post_id"]) for row in cursor))
                 _progress_update(bar)
@@ -822,6 +860,17 @@ def _progress_bar(progress: Any | None, **kwargs: Any):
 def _progress_update(bar: Any | None, amount: int = 1) -> None:
     if bar is not None and hasattr(bar, "update"):
         bar.update(amount)
+
+
+def _progress_set_description(bar: Any | None, desc: str) -> None:
+    if bar is None:
+        return
+    if hasattr(bar, "set_description_str"):
+        bar.set_description_str(desc)
+    elif hasattr(bar, "set_description"):
+        bar.set_description(desc)
+    if hasattr(bar, "refresh"):
+        bar.refresh()
 
 
 def _text_pattern(pattern: str) -> str:

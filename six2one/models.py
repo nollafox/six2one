@@ -59,7 +59,7 @@ class FileMode(str, Enum):
 
     @classmethod
     def from_value(cls, value: str) -> "FileMode":
-        """Build a file mode from a CLI or manifest value.
+        """Build a file mode from a CLI value.
 
         Raises:
             ValueError: If the value is not a supported file mode.

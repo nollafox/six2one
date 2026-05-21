@@ -186,6 +186,8 @@ def queue_query_work(
 def _fetch_posts(e621: Any, query: str, *, limit: int | None) -> list[Any]:
     if e621 is None:
         raise CommandError("Fetching requires an e621 client")
+    if limit == 0:
+        return []
 
     page_size = min(limit or 320, 320)
     collection = e621.posts.search(query, limit=page_size)

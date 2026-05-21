@@ -37,6 +37,21 @@ def test_queue_with_limit_caps_materialized_posts(tmp_path: Path):
     assert e621.posts.requested_limits == [10]
 
 
+def test_queue_with_zero_limit_does_not_call_e621(tmp_path: Path):
+    config = initialized_config(tmp_path)
+    e621 = _PagedE621(total_posts=321)
+
+    result = run_queue(config, "dragon", limit=0, e621=e621)
+
+    with open_storage(config.storage_path, read_only=True) as storage:
+        post_ids = storage.posts.list_ids()
+
+    assert result.summary.cached_posts == 0
+    assert result.summary.new_image_jobs == 0
+    assert len(post_ids) == 0
+    assert e621.posts.requested_limits == []
+
+
 class _PagedE621:
     def __init__(self, *, total_posts: int) -> None:
         self.posts = _PagedPosts(total_posts=total_posts)

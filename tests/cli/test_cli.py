@@ -108,6 +108,16 @@ def test_queue_dispatches_to_new_command():
     assert result.stderr == ""
 
 
+def test_queue_noop_next_steps_reference_current_commands():
+    with patch("six2one.cli.run_queue", return_value=_queue_result(new_image_jobs=0)) as run:
+        result = _run_cli("queue", "dragon rating:s", "--limit", "0")
+
+    assert result.exit_code == 0
+    assert "621 queue list" in result.stdout
+    assert '621 export "dragon rating:s" -o ./six2one-export' in result.stdout
+    assert "621 cache status" not in result.stdout
+
+
 def test_fetch_without_limit_crawls_all_pages_by_default():
     with patch("six2one.cli.run_fetch", return_value=_fetch_result()) as run:
         result = _run_cli("fetch", "dragon rating:s")
@@ -122,6 +132,22 @@ def test_queue_without_limit_crawls_all_pages_by_default():
 
     assert result.exit_code == 0
     assert run.call_args.kwargs["limit"] is None
+
+
+def test_fetch_zero_limit_is_preserved_as_zero():
+    with patch("six2one.cli.run_fetch", return_value=_fetch_result()) as run:
+        result = _run_cli("fetch", "dragon rating:s", "--limit", "0")
+
+    assert result.exit_code == 0
+    assert run.call_args.kwargs["limit"] == 0
+
+
+def test_queue_zero_limit_is_preserved_as_zero():
+    with patch("six2one.cli.run_queue", return_value=_queue_result()) as run:
+        result = _run_cli("queue", "dragon rating:s", "--limit", "0")
+
+    assert result.exit_code == 0
+    assert run.call_args.kwargs["limit"] == 0
 
 
 def test_queue_amend_dispatches_to_new_command():
@@ -264,11 +290,11 @@ def _fetch_result() -> FetchCommandResult:
     )
 
 
-def _queue_result() -> QueueCommandResult:
+def _queue_result(*, new_image_jobs: int = 1) -> QueueCommandResult:
     return QueueCommandResult(
         query="dragon rating:s",
         source_run_id="q_test",
-        summary=QueueRunSummary(discovered_pages=1, cached_posts=1, new_image_jobs=1),
+        summary=QueueRunSummary(discovered_pages=1, cached_posts=1, new_image_jobs=new_image_jobs),
     )
 
 

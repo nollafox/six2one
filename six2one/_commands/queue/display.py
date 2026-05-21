@@ -56,7 +56,7 @@ def format_queue_result(result: QueueCommandResult) -> str:
         lines.extend(["", "Next", "  Download queued images:", "    621 fetch --queue", "", "  Inspect queue:", "    621 queue list"])
     else:
         lines.append(_field("Images already present", _n(summary.already_downloaded)))
-        lines.extend(["", "Next", "  Inspect cache:", "    621 cache status"])
+        lines.extend(["", "Next", "  Inspect active queue work:", "    621 queue list", "", "  Export downloaded matches:", f"    621 export \"{result.query}\" -o ./six2one-export"])
     return "\n".join(lines)
 
 
@@ -93,7 +93,7 @@ def _format_full(result: QueueListResult) -> str:
         "",
         "Note",
         "  Active source runs are runs with pending, failed, or in-progress image jobs.",
-        "  Completed historical runs are shown by cache and backend commands.",
+        "  Completed historical runs remain in local storage for fetch and export reuse.",
         "",
         "Next",
         "  Download pending image jobs:",

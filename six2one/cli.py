@@ -459,8 +459,6 @@ def _limit_from_value(value: int | None) -> int | None:
         return None
     if value < 0:
         raise CommandError("--limit must be zero or greater")
-    if value == 0:
-        return None
     return value
 
 

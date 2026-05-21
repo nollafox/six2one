@@ -8,7 +8,7 @@ from six2one.queue.models import JobKind, JobState
 from six2one.storage.models import ImageVariant
 from six2one.storage import open_storage
 from tests.factories import FakeE621, post_payload
-from tests.support import initialized_config
+from tests.support import initialized_config, mark_test_image_downloaded
 
 
 def test_queue_source_run_keeps_raw_query_and_bound_canonical_metadata(tmp_path: Path):
@@ -49,6 +49,46 @@ def test_queue_clear_uses_alias_and_implication_semantics_not_query_strings(tmp_
     assert result.pending_removed == 1
     assert jobs[1].state is JobState.CANCELLED
     assert jobs[2].state is JobState.READY
+
+
+def test_queue_enqueues_missing_images_for_local_matches_beyond_e621_page(tmp_path: Path):
+    config = _initialize_tagged_storage(tmp_path)
+    e621 = FakeE621(posts=[post_payload(1, tag="dragon")])
+    with open_storage(config.storage_path) as storage:
+        storage.imports.import_posts([post_payload(2, tag="dragon")])
+
+    result = run_queue(config, "dragon rating:s", limit=1, e621=e621)
+
+    with open_storage(config.storage_path, read_only=True) as storage:
+        jobs = storage.queue.list(source_run_id=result.source_run_id)
+
+    queued_post_ids = {int(job.payload["post_id"]) for job in jobs if job.kind is JobKind.DOWNLOAD_ORIGINAL}
+    assert e621.posts.calls == [("dragon rating:s", 1, None)]
+    assert result.summary.cached_posts == 2
+    assert result.summary.new_image_jobs == 2
+    assert queued_post_ids == {1, 2}
+
+
+def test_queue_skips_downloaded_local_matches_beyond_e621_page(tmp_path: Path):
+    config = _initialize_tagged_storage(tmp_path)
+    e621 = FakeE621(posts=[post_payload(1, tag="dragon")])
+    local_image = config.images_dir / "000000000002" / "original.png"
+    local_image.parent.mkdir(parents=True)
+    local_image.write_bytes(b"already downloaded")
+    with open_storage(config.storage_path) as storage:
+        storage.imports.import_posts([post_payload(2, tag="dragon")])
+        mark_test_image_downloaded(storage, post_id=2, variant=ImageVariant.ORIGINAL, local_path=local_image, bytes_written=18)
+
+    result = run_queue(config, "dragon rating:s", limit=1, e621=e621)
+
+    with open_storage(config.storage_path, read_only=True) as storage:
+        jobs = storage.queue.list(source_run_id=result.source_run_id)
+
+    queued_post_ids = {int(job.payload["post_id"]) for job in jobs if job.kind is JobKind.DOWNLOAD_ORIGINAL}
+    assert result.summary.cached_posts == 2
+    assert result.summary.new_image_jobs == 1
+    assert result.summary.already_downloaded == 1
+    assert queued_post_ids == {1}
 
 
 def test_preview_and_sample_payloads_do_not_reuse_original_checksum():

@@ -614,6 +614,23 @@ class IndexedPostSearch:
             return tuple(PostId(int(post_id)) for post_id in values)
         return tuple(PostId(post_id) for post_id in self._sql_ids(bitmap, residual, limit=effective_limit))
 
+    def candidate_ids(self, *, limit: int | None = None) -> tuple[PostId, ...]:
+        """Return a superset of local posts that may match after enrichment.
+
+        The full search path must fail when a predicate cannot be evaluated
+        locally. Candidate discovery has a different contract: keep every local
+        filter the index can decide now, and leave unsupported/enrichment-backed
+        predicates neutral so the queue can fetch the missing data before final
+        evaluation.
+        """
+
+        bitmap = self._candidate_scope_bitmap(self.bound.root)
+        ordered = self._ordered_ids(bitmap)
+        values = tuple(bitmap) if ordered is None else ordered
+        if limit is not None:
+            values = values[:limit]
+        return tuple(PostId(int(post_id)) for post_id in values)
+
     def count(self) -> int:
         bitmap, residual = self._scope_bitmap(self.bound.root)
         if not residual:
@@ -654,6 +671,35 @@ class IndexedPostSearch:
                 residual.extend(term_residual)
             current &= bucket
         return current, residual
+
+    def _candidate_scope_bitmap(self, scope: ScopeExpr) -> BitMap:
+        current = self.repository.all_posts_bitmap()
+        if scope.status is None:
+            current &= self.repository.bitmap(BitmapKey("status", "active"))
+        else:
+            status_bitmap = self._status_bitmap(scope.status.value)
+            current = (current - status_bitmap) if scope.status.occurrence == "prohibited" else (current & status_bitmap)
+        for term in scope.required:
+            bitmap = self._candidate_term_bitmap(term.node, term.occurrence)
+            if term.occurrence is Occurrence.PROHIBITED:
+                current -= bitmap
+            else:
+                current &= bitmap
+        if scope.loose_or is not None:
+            bucket = BitMap()
+            for term in scope.loose_or.entries:
+                bucket |= self._candidate_term_bitmap(term.node, term.occurrence)
+            current &= bucket
+        return current
+
+    def _candidate_term_bitmap(self, node: Any, occurrence: Occurrence) -> BitMap:
+        if isinstance(node, ScopeExpr):
+            return self._candidate_scope_bitmap(node)
+        try:
+            bitmap, _residual = self._term_bitmap(node, occurrence)
+            return bitmap
+        except (IndexRebuildRequired, TypeError, ValueError):
+            return BitMap() if occurrence is Occurrence.PROHIBITED else self.repository.all_posts_bitmap()
 
     def _term_bitmap(self, node: Any, occurrence: Occurrence) -> tuple[BitMap, list[Any]]:
         if isinstance(node, ScopeExpr):

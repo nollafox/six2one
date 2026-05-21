@@ -118,11 +118,13 @@ def queue_query_work(
         },
     )
     posts = _fetch_posts(e621, query, limit=limit)
-    report = storage.imports.import_posts(posts, source_run_id=source_run.id)
-    post_ids = tuple(_post_id(post) for post in posts)
+    storage.imports.import_posts(posts, source_run_id=source_run.id)
+    discovered_post_ids = tuple(_post_id(post) for post in posts)
+    local_matching_post_ids = _local_matching_post_ids(storage, compiled, dependencies=dependencies)
+    post_ids = _candidate_post_ids(discovered_post_ids, local_matching_post_ids)
     stored_posts = storage.posts.get_many(post_ids, load=PostLoad.full())
     page_size = min(limit or 320, 320)
-    discovered_pages = None if not stored_posts else max(1, ceil(len(stored_posts) / max(page_size, 1)))
+    discovered_pages = None if not discovered_post_ids else max(1, ceil(len(discovered_post_ids) / max(page_size, 1)))
 
     queue = Queue(storage, default_registry())
     enrichment_jobs = _enqueue_enrichment_jobs(
@@ -172,7 +174,7 @@ def queue_query_work(
         dependencies=dependencies,
         counts=EnqueuePlanCounts(
             discovered_pages=discovered_pages,
-            cached_posts=report.accepted,
+            cached_posts=len(stored_posts),
             new_image_jobs=image_counts["new_image_jobs"],
             already_queued=image_counts["already_queued"],
             already_downloaded=image_counts["already_downloaded"],
@@ -181,6 +183,18 @@ def queue_query_work(
             evaluation_jobs=eval_jobs,
         ),
     )
+
+
+def _candidate_post_ids(discovered_post_ids: Iterable[int], local_matching_post_ids: Iterable[int]) -> tuple[int, ...]:
+    """Merge remote discovery and local search candidates by post identity."""
+
+    return tuple(dict.fromkeys([*(int(post_id) for post_id in discovered_post_ids), *(int(post_id) for post_id in local_matching_post_ids)]))
+
+
+def _local_matching_post_ids(storage: Storage, compiled: Any, *, dependencies: Iterable[str]) -> tuple[int, ...]:
+    """Return local indexed matches when the query can be answered locally now."""
+
+    return tuple(int(post_id) for post_id in storage.posts.search(compiled).candidate_ids())
 
 
 def _fetch_posts(e621: Any, query: str, *, limit: int | None) -> list[Any]:

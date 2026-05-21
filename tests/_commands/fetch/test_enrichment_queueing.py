@@ -241,6 +241,25 @@ def test_fetch_skips_enrichment_jobs_when_coverage_is_ready(tmp_path):
     assert JobKind.EVALUATE_QUERY in job_kinds
 
 
+def test_fetch_enriches_remote_and_local_candidates_before_evaluation(tmp_path):
+    config = initialized_config(tmp_path)
+    e621 = FakeE621(posts=[post_payload(1, tag="dragon")])
+    with open_storage(config.storage_path) as storage:
+        storage.imports.import_posts([post_payload(2, tag="dragon")])
+
+    with patch("six2one._commands.fetch.command.run_jobs", return_value=_idle_run_summary()):
+        result = run_fetch(config, "dragon commenter:Bob", limit=1, e621=e621)
+
+    with open_storage(config.storage_path, read_only=True) as storage:
+        jobs = storage.queue.list(source_run_id=result.source_run_id)
+
+    comments_job = next(job for job in jobs if job.kind is JobKind.ENRICH_COMMENTS)
+    evaluate_job = next(job for job in jobs if job.kind is JobKind.EVALUATE_QUERY)
+    assert result.discovery.cached_posts == 2
+    assert comments_job.payload["post_ids"] == [1, 2]
+    assert evaluate_job.payload["post_ids"] == [1, 2]
+
+
 def _idle_run_summary():
     return SimpleNamespace(
         downloaded_images=0,

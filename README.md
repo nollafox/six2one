@@ -88,7 +88,7 @@ Tag matching
     such as calico_cat, tabby_cat, hairless_cat, and 65 other tags.
 ```
 
-This feature is what keeps fetches efficient, and ensures offline search works the same way it does on e621. If a query can be answered from cached post fields, six2one uses them directly. If it needs richer data, such as comments, notes, pools, sets, or favorites, six2one fetches that data once and stores it with the matching posts.
+This feature is what keeps fetches efficient, and ensures offline search works the same way it does on e621. Every fetch starts locally: six2one asks the cache for posts that match the parts of the query it can already decide, then pages e621 for any newer or not-yet-cached posts. If the query needs richer data, such as comments, notes, pools, sets, or favorites, six2one queues that enrichment for both local candidates and newly discovered remote candidates, stores it once, and reuses it later.
 
 In other words, simple queries only cache posts, complex queries automatically cache additional data as you go:
 ```bash
@@ -113,7 +113,7 @@ Enrichment is cached by post, not by query. Once six2one has comments for post `
 
 six2one keeps a canonical SQLite cache and a rebuildable search index side by side. SQLite stores the durable facts: posts, tags, aliases, implications, source runs, queue jobs, image records, enrichment coverage, and collection membership. The derived index stores the fast lookup shapes: tag and field bitmaps, ordered post-id lists, and text indexes for source, description, and note search.
 
-That split is what makes the workflow feel local-first without becoming fragile. A query is parsed and bound with e621-compatible semantics, including aliases and implications, then evaluated against the local index whenever the needed data is already present. If a query needs more data, such as comments, notes, pools, sets, favorites, votes, or moderation metadata, six2one queues the missing enrichment, stores it in SQLite, updates coverage, and reuses it the next time.
+That split is what makes the workflow feel local-first without becoming fragile. A query is parsed and bound with e621-compatible semantics, including aliases and implications, then the local index contributes every cached or mirrored post that can match the locally decidable parts of the query. e621 pagination is used as discovery for newer or missing posts, not as the only source of candidates. If a query needs more data, such as comments, notes, pools, sets, favorites, votes, or moderation metadata, six2one queues the missing enrichment for the combined local and remote candidate set, stores it in SQLite, updates coverage, and reuses it the next time.
 
 Broad fetches fill the archive, narrower queries carve it, and exports turn matching downloaded posts into portable folders. Interrupted work is safe to resume because fetches run through the internal queue; `fetch --queue` drains queued work once, while `fetch --queue --watch` keeps a worker alive for new jobs. Downloaded images are keyed by post ID and variant rather than by query spelling, so aliases and overlapping searches converge on the same cached files.
 
@@ -126,7 +126,8 @@ A single run moves through the same stages, from a raw query to files on disk:
 ```text
 query
   → compile the query
-  → discover matching posts
+  → find cached/mirrored candidates locally
+  → page e621 for additional remote candidates
   → cache typed post fields
   → update the local search index
   → fetch missing enrichment
@@ -231,7 +232,7 @@ $ 621 query explain "dragon rating:e" --json
 
 ### Queue
 
-Use `queue` when you want to inspect, modify, or stage work before downloading. It runs discovery only: it finds matching posts, caches their post JSON, enqueues any enrichment the query needs, evaluates the query locally, and queues image downloads — without downloading them.
+Use `queue` when you want to inspect, modify, or stage work before downloading. It runs discovery only: it finds matching cached/mirrored posts locally, pages e621 for additional matching posts, caches their post JSON, enqueues any enrichment the query needs, evaluates the query locally, and queues image downloads — without downloading them.
 
 ```bash
 $ 621 queue "dragon rating:s" --limit 10
@@ -308,7 +309,7 @@ Worker mode keeps polling the durable queue and processes new jobs as they arriv
 $ 621 fetch "dragon rating:s" --limit 10
 ```
 
-`fetch` runs both phases: everything `queue` does, then the download. It discovers posts, caches post JSON, fetches missing enrichment, evaluates the query, and writes the matching images to disk.
+`fetch` runs both phases: everything `queue` does, then the download. It searches the local database first, pages e621 for additional posts, caches post JSON, fetches missing enrichment, evaluates the query, and writes the matching images to disk.
 
 ```text
 six2one fetch
@@ -333,7 +334,7 @@ Phase 2/2: Downloading images
 Done.
 ```
 
-`fetch` and `queue` both take `--limit N`, which caps a run at N posts; without it, six2one processes every page the query returns. Pick the image variant with `--file-type`:
+`fetch` and `queue` both take `--limit N`, which caps remote discovery from e621. Local cached or mirrored posts that match the query are still considered, so after `621 mirror` a fetch can queue downloads for matching local posts beyond what e621 will serve in ordinary result pages. Without `--limit`, six2one processes every e621 page the query returns. Pick the image variant with `--file-type`:
 
 ```bash
 $ 621 fetch "dragon rating:s" --file-type original

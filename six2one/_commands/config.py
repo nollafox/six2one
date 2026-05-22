@@ -8,6 +8,8 @@ from typing import Any
 DEFAULT_HOME = Path("~/.six2one")
 DEFAULT_USER_AGENT = "six2one/0.1"
 DEFAULT_IMAGE_VARIANT = "original"
+DEFAULT_E621_RATE_LIMIT = "2/s"
+DEFAULT_QUEUE_WORKERS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +26,8 @@ class SixTwoOneConfig:
     api_token: str | None = None
     user_agent: str = DEFAULT_USER_AGENT
     default_image_variant: str = DEFAULT_IMAGE_VARIANT
+    e621_rate_limit: str = DEFAULT_E621_RATE_LIMIT
+    queue_workers: int = DEFAULT_QUEUE_WORKERS
 
     @classmethod
     def load(cls, home: str | Path | None = None) -> "SixTwoOneConfig":
@@ -46,6 +50,8 @@ class SixTwoOneConfig:
             api_token=getattr(args, "api_token", None) or getattr(args, "token", None),
             user_agent=getattr(args, "user_agent", DEFAULT_USER_AGENT),
             default_image_variant=getattr(args, "image_variant", DEFAULT_IMAGE_VARIANT),
+            e621_rate_limit=getattr(args, "e621_rate_limit", DEFAULT_E621_RATE_LIMIT),
+            queue_workers=getattr(args, "queue_workers", DEFAULT_QUEUE_WORKERS),
         )
         if config.api_username and config.api_token:
             return config
@@ -58,6 +64,8 @@ class SixTwoOneConfig:
             api_token=stored[1],
             user_agent=f"{config.user_agent} (by {stored[0]} on e621)",
             default_image_variant=config.default_image_variant,
+            e621_rate_limit=config.e621_rate_limit,
+            queue_workers=config.queue_workers,
         )
 
     def stored_auth(self) -> tuple[str, str] | None:
@@ -116,4 +124,6 @@ class SixTwoOneConfig:
             "api_username": self.api_username,
             "user_agent": self.user_agent,
             "default_image_variant": self.default_image_variant,
+            "e621_rate_limit": self.e621_rate_limit,
+            "queue_workers": self.queue_workers,
         }

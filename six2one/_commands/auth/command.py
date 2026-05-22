@@ -121,7 +121,7 @@ class AuthCommand:
         raise CommandError("Unsupported auth choice.")
 
     def _verify(self, username: str, api_token: str) -> AuthAccount:
-        client = self.e621 or E621Client(auth=(username, api_token), user_agent=self.config.user_agent)
+        client = self.e621 or E621Client(auth=(username, api_token), user_agent=self.config.user_agent, rate_limit=self.config.e621_rate_limit)
         try:
             user = client.me()
         except (E621AuthError, E621PermissionError) as error:

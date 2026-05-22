@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 import shutil
+from threading import Lock
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +63,7 @@ from ..index import (
 from ..models import CollectionKind, Post, PostId, PostLoad, Rating
 from ..models.tag import unpack_tag_ids
 from ..models.time import utc_now_ms
-from .base import BaseRepository
+from .base import BaseRepository, chunked_ids
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +167,9 @@ class StreamingSearchIndexBuilder:
                 for implied_tag_id in self._tag_closure.get(tag_id, ()):
                     buckets.setdefault(BitmapKey("tag", int(implied_tag_id)), BitMap()).update(bitmap)
                 _progress_update(bar)
+
+
+_INDEX_WRITE_LOCK = Lock()
 
 
 class SearchRepository(BaseRepository):
@@ -297,28 +301,29 @@ class SearchRepository(BaseRepository):
         ids = tuple(sorted({int(post_id) for post_id in post_ids}))
         if not ids:
             return
-        self.provision()
-        store = BitmapIndexStore(self.config.delta_lmdb, map_size_bytes=self.config.map_size_bytes)
-        try:
-            for key, values in self._bitmap_rows_for_post_ids(ids).items():
-                bitmap = store.get(key)
-                bitmap.update(values)
-                store.put(key, bitmap)
-        finally:
-            store.close()
-        self._refresh_text_index_for_post_ids(ids)
-        current = self.manifest() or IndexManifest.empty()
-        self._write_manifest(
-            IndexManifest(
-                schema_version=INDEX_SCHEMA_VERSION,
-                generation_id=current.generation_id if current.generation_id != "empty" else secrets.token_hex(12),
-                post_count=self._post_count(),
-                tag_snapshot=str(self.database.fetch_scalar("SELECT value FROM schema_metadata WHERE namespace = 'tags' AND key = 'snapshot'") or "unknown"),
-                alias_count=int(self.database.fetch_scalar("SELECT COUNT(*) FROM tag_aliases") or 0),
-                implication_count=int(self.database.fetch_scalar("SELECT COUNT(*) FROM tag_implications") or 0),
-                build_status="ready",
+        with _INDEX_WRITE_LOCK:
+            self.provision()
+            store = BitmapIndexStore(self.config.delta_lmdb, map_size_bytes=self.config.map_size_bytes)
+            try:
+                for key, values in self._bitmap_rows_for_post_ids(ids).items():
+                    bitmap = store.get(key)
+                    bitmap.update(values)
+                    store.put(key, bitmap)
+            finally:
+                store.close()
+            self._refresh_text_index_for_post_ids(ids)
+            current = self.manifest() or IndexManifest.empty()
+            self._write_manifest(
+                IndexManifest(
+                    schema_version=INDEX_SCHEMA_VERSION,
+                    generation_id=current.generation_id if current.generation_id != "empty" else secrets.token_hex(12),
+                    post_count=self._post_count(),
+                    tag_snapshot=str(self.database.fetch_scalar("SELECT value FROM schema_metadata WHERE namespace = 'tags' AND key = 'snapshot'") or "unknown"),
+                    alias_count=int(self.database.fetch_scalar("SELECT COUNT(*) FROM tag_aliases") or 0),
+                    implication_count=int(self.database.fetch_scalar("SELECT COUNT(*) FROM tag_implications") or 0),
+                    build_status="ready",
+                )
             )
-        )
 
     def search(self, compiled_query: Any, *, posts_repository: Any) -> "IndexedPostSearch":
         return IndexedPostSearch(repository=self, posts_repository=posts_repository, compiled_query=compiled_query)
@@ -549,81 +554,83 @@ class SearchRepository(BaseRepository):
         )
 
     def _bitmap_rows_for_post_ids(self, post_ids: tuple[int, ...]) -> dict[BitmapKey, list[int]]:
-        placeholders = ",".join("?" for _ in post_ids)
         buckets: dict[BitmapKey, list[int]] = {}
 
         def add(key: BitmapKey, post_id: int) -> None:
             buckets.setdefault(key, []).append(int(post_id))
 
-        for row in self.database.fetch_all(f"SELECT post_id, rating_id, flags FROM posts WHERE post_id IN ({placeholders})", post_ids):
-            post_id = int(row["post_id"])
-            flags = int(row["flags"] or 0)
-            add(BitmapKey("all", "posts"), post_id)
-            add(BitmapKey("rating", int(row["rating_id"])), post_id)
-            add(BitmapKey("status", "deleted" if flags & 1 else "active"), post_id)
-        for row in self.database.fetch_all(f"SELECT tag_id, post_id FROM post_tag_edges WHERE post_id IN ({placeholders})", post_ids):
-            add(BitmapKey("tag", int(row["tag_id"])), int(row["post_id"]))
-        for row in self.database.fetch_all(f"SELECT post_id, tag_ids FROM post_tag_sets WHERE post_id IN ({placeholders})", post_ids):
-            post_id = int(row["post_id"])
-            for tag_id in unpack_tag_ids(row["tag_ids"]):
-                add(BitmapKey("tag", int(tag_id)), post_id)
-        for row in self.database.fetch_all(
-            f"""
-            SELECT c.consequent_tag_id AS tag_id, e.post_id
-            FROM post_tag_edges AS e
-            JOIN tag_implication_closure AS c ON c.antecedent_tag_id = e.tag_id
-            WHERE e.post_id IN ({placeholders})
-            """,
-            post_ids,
-        ):
-            add(BitmapKey("tag", int(row["tag_id"])), int(row["post_id"]))
         closure = self._tag_closure_map()
-        for row in self.database.fetch_all(f"SELECT post_id, tag_ids FROM post_tag_sets WHERE post_id IN ({placeholders})", post_ids):
-            post_id = int(row["post_id"])
-            for tag_id in unpack_tag_ids(row["tag_ids"]):
-                for implied_tag_id in closure.get(int(tag_id), ()):
-                    add(BitmapKey("tag", int(implied_tag_id)), post_id)
+        for batch in chunked_ids(post_ids):
+            placeholders = ",".join("?" for _ in batch)
+            for row in self.database.fetch_all(f"SELECT post_id, rating_id, flags FROM posts WHERE post_id IN ({placeholders})", batch):
+                post_id = int(row["post_id"])
+                flags = int(row["flags"] or 0)
+                add(BitmapKey("all", "posts"), post_id)
+                add(BitmapKey("rating", int(row["rating_id"])), post_id)
+                add(BitmapKey("status", "deleted" if flags & 1 else "active"), post_id)
+            for row in self.database.fetch_all(f"SELECT tag_id, post_id FROM post_tag_edges WHERE post_id IN ({placeholders})", batch):
+                add(BitmapKey("tag", int(row["tag_id"])), int(row["post_id"]))
+            for row in self.database.fetch_all(f"SELECT post_id, tag_ids FROM post_tag_sets WHERE post_id IN ({placeholders})", batch):
+                post_id = int(row["post_id"])
+                for tag_id in unpack_tag_ids(row["tag_ids"]):
+                    add(BitmapKey("tag", int(tag_id)), post_id)
+            for row in self.database.fetch_all(
+                f"""
+                SELECT c.consequent_tag_id AS tag_id, e.post_id
+                FROM post_tag_edges AS e
+                JOIN tag_implication_closure AS c ON c.antecedent_tag_id = e.tag_id
+                WHERE e.post_id IN ({placeholders})
+                """,
+                batch,
+            ):
+                add(BitmapKey("tag", int(row["tag_id"])), int(row["post_id"]))
+            for row in self.database.fetch_all(f"SELECT post_id, tag_ids FROM post_tag_sets WHERE post_id IN ({placeholders})", batch):
+                post_id = int(row["post_id"])
+                for tag_id in unpack_tag_ids(row["tag_ids"]):
+                    for implied_tag_id in closure.get(int(tag_id), ()):
+                        add(BitmapKey("tag", int(implied_tag_id)), post_id)
         return buckets
 
     def _refresh_text_index_for_post_ids(self, post_ids: tuple[int, ...]) -> None:
-        placeholders = ",".join("?" for _ in post_ids)
         with self.database.write_if_needed():
-            self.database.execute(f"DELETE FROM post_descriptions_fts WHERE post_id IN ({placeholders})", post_ids)
-            self.database.execute(f"DELETE FROM post_sources_fts WHERE post_id IN ({placeholders})", post_ids)
-            self.database.execute(f"DELETE FROM post_notes_fts WHERE post_id IN ({placeholders})", post_ids)
-            self.database.execute(
-                f"""
-                INSERT INTO post_descriptions_fts(rowid, post_id, description)
-                SELECT post_id, post_id, COALESCE(description, '')
-                FROM post_details
-                WHERE post_id IN ({placeholders})
-                  AND description IS NOT NULL
-                  AND description <> ''
-                """,
-                post_ids,
-            )
-            self.database.execute(
-                f"""
-                INSERT INTO post_sources_fts(post_id, source_url)
-                SELECT e.post_id, s.source_url
-                FROM post_source_edges AS e
-                JOIN sources AS s ON s.source_id = e.source_id
-                WHERE e.post_id IN ({placeholders})
-                """,
-                post_ids,
-            )
-            self.database.execute(
-                f"""
-                INSERT INTO post_notes_fts(post_id, body)
-                SELECT n.post_id, COALESCE(t.body, '')
-                FROM notes AS n
-                JOIN note_text AS t ON t.note_id = n.note_id
-                WHERE n.post_id IN ({placeholders})
-                  AND t.body IS NOT NULL
-                  AND t.body <> ''
-                """,
-                post_ids,
-            )
+            for batch in chunked_ids(post_ids):
+                placeholders = ",".join("?" for _ in batch)
+                self.database.execute(f"DELETE FROM post_descriptions_fts WHERE post_id IN ({placeholders})", batch)
+                self.database.execute(f"DELETE FROM post_sources_fts WHERE post_id IN ({placeholders})", batch)
+                self.database.execute(f"DELETE FROM post_notes_fts WHERE post_id IN ({placeholders})", batch)
+                self.database.execute(
+                    f"""
+                    INSERT INTO post_descriptions_fts(rowid, post_id, description)
+                    SELECT post_id, post_id, COALESCE(description, '')
+                    FROM post_details
+                    WHERE post_id IN ({placeholders})
+                      AND description IS NOT NULL
+                      AND description <> ''
+                    """,
+                    batch,
+                )
+                self.database.execute(
+                    f"""
+                    INSERT INTO post_sources_fts(post_id, source_url)
+                    SELECT e.post_id, s.source_url
+                    FROM post_source_edges AS e
+                    JOIN sources AS s ON s.source_id = e.source_id
+                    WHERE e.post_id IN ({placeholders})
+                    """,
+                    batch,
+                )
+                self.database.execute(
+                    f"""
+                    INSERT INTO post_notes_fts(post_id, body)
+                    SELECT n.post_id, COALESCE(t.body, '')
+                    FROM notes AS n
+                    JOIN note_text AS t ON t.note_id = n.note_id
+                    WHERE n.post_id IN ({placeholders})
+                      AND t.body IS NOT NULL
+                      AND t.body <> ''
+                    """,
+                    batch,
+                )
 
     def _validate_fts5_trigram(self) -> None:
         try:

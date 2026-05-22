@@ -294,7 +294,7 @@ def _drain_queue(
 
 
 def _create_e621_client(config: SixTwoOneConfig) -> E621Client:
-    return E621Client(auth=config.auth, user_agent=config.user_agent)
+    return E621Client(auth=config.auth, user_agent=config.user_agent, rate_limit=config.e621_rate_limit)
 
 
 def _pending_image_jobs(storage, *, source_run_id: str | None) -> int:

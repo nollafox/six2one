@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from .base import BaseRepository
+from .base import BaseRepository, chunked_ids
 from ..database import PostNotFound, UnsupportedQueryError
 from ..models import (
     Found,
@@ -62,17 +62,21 @@ class PostRepository(BaseRepository):
         ids = tuple(dict.fromkeys(int(post_id) for post_id in post_ids))
         if not ids:
             return ()
-        placeholders = ",".join("?" for _ in ids)
-        summaries = self.database.fetch_models(
-            PostSummary,
-            f"""
-            SELECT p.*, fe.extension AS file_ext
-            FROM posts AS p
-            LEFT JOIN file_extensions AS fe ON fe.file_ext_id = p.file_ext_id
-            WHERE p.post_id IN ({placeholders})
-            """,
-            ids,
-        )
+        summaries: list[PostSummary] = []
+        for batch in chunked_ids(ids):
+            placeholders = ",".join("?" for _ in batch)
+            summaries.extend(
+                self.database.fetch_models(
+                    PostSummary,
+                    f"""
+                    SELECT p.*, fe.extension AS file_ext
+                    FROM posts AS p
+                    LEFT JOIN file_extensions AS fe ON fe.file_ext_id = p.file_ext_id
+                    WHERE p.post_id IN ({placeholders})
+                    """,
+                    batch,
+                )
+            )
         by_id = {int(summary.id): summary for summary in summaries}
         ordered_ids = ids if preserve_order else tuple(sorted(by_id))
         return tuple(
@@ -172,4 +176,3 @@ class PostRepository(BaseRepository):
             """,
             (post_id,),
         )
-

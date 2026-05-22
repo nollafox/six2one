@@ -42,7 +42,7 @@ class Store:
     store owns transaction boundaries and connection lifecycle.
     """
 
-    def __init__(self, database: SQLite) -> None:
+    def __init__(self, database: SQLite, *, provision_search: bool = True) -> None:
         self.database = database
         index_root = database.config.index_dir or (database.path.parent / "index")
         self.search = SearchRepository(database, IndexConfig(index_root))
@@ -70,12 +70,18 @@ class Store:
         self.queue = QueueRepository(database)
         self.imports = ImportRepository(database, self.search)
         self.maintenance = MaintenanceRepository(database)
-        if not database.config.read_only:
+        if provision_search and not database.config.read_only:
             self.search.provision()
 
     @classmethod
-    def open(cls, config: StoreConfig | str | Path, *, read_only: bool | None = None) -> "Store":
-        return cls(SQLite.connect(config, read_only=read_only))
+    def open(
+        cls,
+        config: StoreConfig | str | Path,
+        *,
+        read_only: bool | None = None,
+        provision_search: bool = True,
+    ) -> "Store":
+        return cls(SQLite.connect(config, read_only=read_only), provision_search=provision_search)
 
     @contextmanager
     def read(self) -> Iterator["Store"]:

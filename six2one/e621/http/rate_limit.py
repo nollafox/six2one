@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
+from threading import Lock
+from typing import Callable
 
 
 _RATE = re.compile(r"^\s*(?P<count>\d+(?:\.\d+)?)\s*/\s*(?P<unit>s|sec|second|m|min|minute)\s*$")
@@ -18,11 +20,14 @@ class RateLimiter:
     ``None`` or ``"0/s"`` disables waiting.
     """
 
-    rate: str | None = "1/s"
+    rate: str | None = "2/s"
+    monotonic: Callable[[], float] = time.monotonic
+    sleeper: Callable[[float], None] = time.sleep
 
     def __post_init__(self) -> None:
         self._last_request = 0.0
         self._interval = self._parse_interval(self.rate)
+        self._lock = Lock()
 
     def wait(self) -> None:
         """Sleep until another request is allowed."""
@@ -30,11 +35,12 @@ class RateLimiter:
         if self._interval <= 0:
             return
 
-        now = time.monotonic()
-        remaining = self._interval - (now - self._last_request)
-        if remaining > 0:
-            time.sleep(remaining)
-        self._last_request = time.monotonic()
+        with self._lock:
+            now = self.monotonic()
+            remaining = self._interval - (now - self._last_request)
+            if remaining > 0:
+                self.sleeper(remaining)
+            self._last_request = self.monotonic()
 
     @staticmethod
     def _parse_interval(rate: str | None) -> float:

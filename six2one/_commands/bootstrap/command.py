@@ -200,7 +200,7 @@ class Bootstrap:
         self.config.marker_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _create_e621_client(self) -> E621Client:
-        return E621Client(auth=self.config.auth, user_agent=self.config.user_agent)
+        return E621Client(auth=self.config.auth, user_agent=self.config.user_agent, rate_limit=self.config.e621_rate_limit)
 
 
 @dataclass(slots=True)

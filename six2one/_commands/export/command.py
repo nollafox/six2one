@@ -38,7 +38,7 @@ def run_export(
     """Export locally downloaded images and cached post JSON matching a query."""
 
     out = Path(output_dir).expanduser()
-    client = e621 or E621Client(auth=config.auth, user_agent=config.user_agent)
+    client = e621 or E621Client(auth=config.auth, user_agent=config.user_agent, rate_limit=config.e621_rate_limit)
 
     with open_storage(config.storage_path) as storage:
         candidate_ids = storage.files.downloaded_post_ids()
@@ -57,7 +57,6 @@ def run_export(
                 source_run_id=source_run.id,
                 dependencies=dependencies,
                 post_ids=candidate_ids,
-                stored_posts=(),
                 user_lookups=_user_lookups(compiled),
             )
             if enrichment_jobs:

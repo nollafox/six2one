@@ -16,6 +16,17 @@ def test_rate_limiter_parses_disabled():
     limiter.wait()
 
 
+def test_rate_limiter_paces_request_starts_at_two_per_second():
+    clock = _FakeClock()
+    limiter = RateLimiter("2/s", monotonic=clock.monotonic, sleeper=clock.sleep)
+
+    limiter.wait()
+    limiter.wait()
+    limiter.wait()
+
+    assert clock.sleeps == [0.5, 0.5]
+
+
 def test_retry_policy():
     policy = RetryPolicy(max_retries=2)
     assert policy.should_retry(429, 0)
@@ -31,3 +42,16 @@ def test_response_error_mapping():
         raise_for_status(ResponseInfo(404, {}, b"missing"))
     with pytest.raises(E621RateLimitError):
         raise_for_status(ResponseInfo(429, {"Retry-After": "1"}, b"slow"))
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 10.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds

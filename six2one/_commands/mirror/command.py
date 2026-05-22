@@ -39,7 +39,7 @@ def run_mirror(
 ) -> MirrorResult:
     """Download query-relevant e621 DB exports and import them into storage."""
 
-    client = e621 or E621Client(auth=config.auth, user_agent=config.user_agent)
+    client = e621 or E621Client(auth=config.auth, user_agent=config.user_agent, rate_limit=config.e621_rate_limit)
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     config.images_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="six2one-mirror-") as tmp:

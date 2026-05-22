@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
-from .base import BaseRepository
+from .base import BaseRepository, chunked_ids
 from ..models import Claimed, DownloadState, ImageVariant, NothingReady, PostFile
 from ..models.time import datetime_to_ms, utc_now_ms
 
@@ -75,21 +75,37 @@ class FileRepository(BaseRepository):
         )
         return tuple(int(row["post_id"]) for row in rows)
 
-    def downloaded_for_posts(self, post_ids: Iterable[int]) -> tuple[PostFile, ...]:
+    def downloaded_for_posts(
+        self,
+        post_ids: Iterable[int],
+        *,
+        variant: ImageVariant | None = None,
+    ) -> tuple[PostFile, ...]:
         ids = tuple(dict.fromkeys(int(post_id) for post_id in post_ids))
         if not ids:
             return ()
-        placeholders = ",".join("?" for _ in ids)
-        return self.database.fetch_models(
-            PostFile,
-            _FILE_SELECT
-            + f"""
-            WHERE pf.download_state_id = ?
-              AND pf.post_id IN ({placeholders})
-            ORDER BY pf.post_id, pf.variant_id
-            """,
-            (int(DownloadState.DOWNLOADED), *ids),
-        )
+        files: list[PostFile] = []
+        variant_sql = ""
+        variant_params: tuple[int, ...] = ()
+        if variant is not None:
+            variant_sql = "AND pf.variant_id = ?"
+            variant_params = (int(variant),)
+        for batch in chunked_ids(ids):
+            placeholders = ",".join("?" for _ in batch)
+            files.extend(
+                self.database.fetch_models(
+                    PostFile,
+                    _FILE_SELECT
+                    + f"""
+                    WHERE pf.download_state_id = ?
+                      {variant_sql}
+                      AND pf.post_id IN ({placeholders})
+                    ORDER BY pf.post_id, pf.variant_id
+                    """,
+                    (int(DownloadState.DOWNLOADED), *variant_params, *batch),
+                )
+            )
+        return tuple(files)
 
     def path_for(
         self,

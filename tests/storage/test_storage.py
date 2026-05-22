@@ -69,6 +69,18 @@ def test_post_import_preserves_indexes_and_is_idempotent(store):
     assert store.posts.search(language.compile("wolf")).ids() == (202,)
 
 
+def test_bulk_post_import_and_loading_chunks_sqlite_parameters(store):
+    posts = [post_payload(post_id, tag="dragon") for post_id in range(1, 1_101)]
+
+    report = store.imports.import_posts(posts)
+    loaded = store.posts.get_many(range(1, 1_101), load=PostLoad.summary())
+    language = E621QueryLanguage(tag_database=store.tags)
+
+    assert report.accepted == 1_100
+    assert len(loaded) == 1_100
+    assert len(store.posts.search(language.compile("dragon rating:s")).ids()) == 1_100
+
+
 def test_search_uses_semantic_tags_with_indexed_candidates(store):
     store.tags.import_exports(
         tags=[

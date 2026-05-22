@@ -376,7 +376,7 @@ def run_queue_clear(
 
 
 def _create_e621_client(config: SixTwoOneConfig) -> E621Client:
-    return E621Client(auth=config.auth, user_agent=config.user_agent)
+    return E621Client(auth=config.auth, user_agent=config.user_agent, rate_limit=config.e621_rate_limit)
 
 
 def _queue_list_from_storage(storage, *, failed: bool, compact: bool) -> QueueListResult:

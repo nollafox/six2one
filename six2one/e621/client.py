@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any
 
 from .http import Transport
@@ -38,23 +39,28 @@ class IdentityMap:
     def __init__(self, enabled: bool = True) -> None:
         self.enabled = enabled
         self._items: dict[tuple[str, int], object] = {}
+        self._lock = RLock()
 
     def get(self, resource: str, id: int):
         if not self.enabled:
             return None
-        return self._items.get((resource, id))
+        with self._lock:
+            return self._items.get((resource, id))
 
     def put(self, resource: str, id: int, model: object):
         if not self.enabled:
             return model
-        self._items[(resource, id)] = model
+        with self._lock:
+            self._items[(resource, id)] = model
         return model
 
     def discard(self, resource: str, id: int) -> None:
-        self._items.pop((resource, id), None)
+        with self._lock:
+            self._items.pop((resource, id), None)
 
     def clear(self) -> None:
-        self._items.clear()
+        with self._lock:
+            self._items.clear()
 
 
 class E621Client:
@@ -66,7 +72,7 @@ class E621Client:
         auth: Auth | None = None,
         user_agent: str,
         base_url: str = "https://e621.net",
-        rate_limit: str | None = "1/s",
+        rate_limit: str | None = "2/s",
         identity_map: bool = True,
         timeout: float = 30.0,
         max_retries: int = 3,

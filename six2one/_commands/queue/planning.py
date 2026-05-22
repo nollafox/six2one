@@ -17,7 +17,7 @@ from six2one.query import E621QueryLanguage
 from six2one.query.ast import CurrentUser, Occurrence, ScopeExpr, TagPredicate, UserId, UserName, UserPredicate
 from six2one.queue import Queue, default_registry
 from six2one.queue.models import JobKind, JobState
-from six2one.storage.models import ImageVariant, PostLoad, SourceRunId
+from six2one.storage.models import ImageVariant, SourceRunId
 from six2one.storage.stores import Storage
 
 from six2one._commands.config import SixTwoOneConfig
@@ -146,7 +146,6 @@ def queue_query_work(
         _progress_set_description(phase, "Searching local cache")
         local_matching_post_ids = _local_matching_post_ids(storage, compiled, dependencies=dependencies)
         post_ids = _candidate_post_ids(discovered_post_ids, local_matching_post_ids)
-        stored_posts = storage.posts.get_many(post_ids, load=PostLoad.full())
         discovered_pages = None
         _progress_update(phase)
 
@@ -157,7 +156,6 @@ def queue_query_work(
             source_run_id=str(int(source_run.id)),
             dependencies=dependencies,
             post_ids=post_ids,
-            stored_posts=stored_posts,
             user_lookups=_user_lookups(compiled),
             progress=progress,
         )
@@ -173,14 +171,19 @@ def queue_query_work(
                 post_ids=post_ids,
                 image_variant=variant,
             )
-            image_counts = {"new_image_jobs": 0, "already_queued": 0, "already_downloaded": sum(1 for post in stored_posts if storage.files.exists(int(post.id), variant)), "skipped": 0}
+            image_counts = {
+                "new_image_jobs": 0,
+                "already_queued": 0,
+                "already_downloaded": len(storage.files.downloaded_for_posts(post_ids, variant=variant)),
+                "skipped": 0,
+            }
         else:
             image_counts = {"new_image_jobs": 0, "already_queued": 0, "already_downloaded": 0, "skipped": 0}
             eval_jobs = 0
         _progress_update(phase)
 
     if page_jobs == 0 and enrichment_jobs == 0 and eval_jobs == 0 and image_counts["new_image_jobs"] == 0:
-        storage.source_runs.update_state(source_run.id, "success", total_candidates=len(stored_posts), total_matches=len(stored_posts))
+        storage.source_runs.update_state(source_run.id, "success", total_candidates=len(post_ids), total_matches=len(post_ids))
 
     return QueuePlanResult(
         source_run_id=source_run.id,
@@ -189,7 +192,7 @@ def queue_query_work(
         dependencies=dependencies,
         counts=EnqueuePlanCounts(
             discovered_pages=discovered_pages,
-            cached_posts=len(stored_posts),
+            cached_posts=len(post_ids),
             page_jobs=page_jobs,
             new_image_jobs=image_counts["new_image_jobs"],
             already_queued=image_counts["already_queued"],
@@ -342,7 +345,6 @@ def _enqueue_enrichment_jobs(
     source_run_id: SourceRunId,
     dependencies: Iterable[str],
     post_ids: tuple[int, ...],
-    stored_posts: tuple[Any, ...],
     user_lookups: Mapping[str, tuple[Any, ...]] | None = None,
     progress: Any | None = None,
 ) -> int:
@@ -602,4 +604,3 @@ def _image_variant_from_name(value: object) -> ImageVariant:
         if normalized in variants:
             return variants[normalized]
     raise ValueError(f"Unsupported image variant: {value!r}")
-

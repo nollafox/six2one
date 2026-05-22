@@ -27,6 +27,19 @@ def test_rate_limiter_paces_request_starts_at_two_per_second():
     assert clock.sleeps == [0.5, 0.5]
 
 
+def test_rate_limiter_reports_rolling_request_start_rate():
+    clock = _FakeClock()
+    limiter = RateLimiter("2/s", monotonic=clock.monotonic, sleeper=clock.sleep)
+
+    limiter.wait()
+    limiter.wait()
+    limiter.wait()
+    clock.now += 0.5
+
+    assert limiter.total_requests == 3
+    assert limiter.requests_per_second(window_seconds=2.0) == pytest.approx(2.0)
+
+
 def test_retry_policy():
     policy = RetryPolicy(max_retries=2)
     assert policy.should_retry(429, 0)

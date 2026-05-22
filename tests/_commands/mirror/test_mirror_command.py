@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,32 +18,39 @@ from tests.support import import_test_posts, mark_test_image_downloaded
 from tests.storage.test_tags import FakeExport
 
 
-def test_mirror_imports_query_relevant_exports_with_progress(tmp_path: Path):
+@pytest.fixture
+def mirror_world(tmp_path: Path) -> "_MirrorWorld":
     config = SixTwoOneConfig(home=tmp_path / "home")
     e621 = _MirrorE621()
     progress = _ProgressSpy()
 
     result = run_mirror(config, date="2026-05-18", e621=e621, progress=progress)
 
+    return _MirrorWorld(config=config, result=result, progress=progress)
+
+
+def test_mirror_imports_query_relevant_exports(mirror_world: "_MirrorWorld"):
+    config = mirror_world.config
     with open_storage(config.storage_path, read_only=True) as storage:
         post = storage.posts.get(100, load=PostLoad.full())
         pool = storage.pools.for_post(100)[0]
         tag = storage.tags.resolve("cat")
         jobs = storage.queue.list()
 
-    assert result.export_date == "2026-05-18"
-    assert result.posts_count == 1
-    assert result.pools_count == 1
-    assert post is not None
-    assert post.summary.duration_ms == 154
-    assert post.raw["duration"] == 154
-    assert post.raw["tags"]["general"] == ["solo"]
-    assert post.raw["tags"]["species"] == ["domestic_cat"]
-    assert pool.name == "cute_cats"
-    assert tag.canonical_name == "domestic_cat"
-    assert result.image_jobs_queued == 0
+    assert (mirror_world.result.export_date, mirror_world.result.posts_count, mirror_world.result.pools_count) == ("2026-05-18", 1, 1)
+    assert (post.summary.duration_ms, post.raw["duration"], pool.name, tag.canonical_name) == (154, 154, "cute_cats", "domestic_cat")
     assert jobs == ()
-    assert {call["desc"] for call in progress.calls} >= {
+
+
+def test_mirror_preserves_export_tag_categories(mirror_world: "_MirrorWorld"):
+    with open_storage(mirror_world.config.storage_path, read_only=True) as storage:
+        post = storage.posts.get(100, load=PostLoad.full())
+
+    assert post.raw["tags"] == {"general": ["solo"], "species": ["domestic_cat"]}
+
+
+def test_mirror_reports_long_running_progress_phases(mirror_world: "_MirrorWorld"):
+    assert {call["desc"] for call in mirror_world.progress.calls} >= {
         "Downloading tags-2026-05-18.csv.gz",
         "Downloading tag_aliases-2026-05-18.csv.gz",
         "Downloading tag_implications-2026-05-18.csv.gz",
@@ -60,7 +68,10 @@ def test_mirror_imports_query_relevant_exports_with_progress(tmp_path: Path):
         "Rebuilding text indexes",
         "Importing pools",
     }
-    assert not (config.exports_dir / "posts-2026-05-18.csv.gz").exists()
+
+
+def test_mirror_uses_temporary_downloads(mirror_world: "_MirrorWorld"):
+    assert not (mirror_world.config.exports_dir / "posts-2026-05-18.csv.gz").exists()
 
 
 def test_mirror_after_bootstrap_tag_import_does_not_update_referenced_tag_ids(tmp_path: Path):
@@ -158,51 +169,21 @@ def test_mirror_queues_stale_downloaded_original(tmp_path: Path):
     old_md5 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     new_md5 = "0123456789abcdef0123456789abcdef"
     config = SixTwoOneConfig(home=tmp_path / "home")
-    local = config.images_dir / "000000000100" / "original.png"
-    local.parent.mkdir(parents=True, exist_ok=True)
-    local.write_bytes(b"old image data")
-    with create_storage(config.storage_path) as storage:
-        import_test_posts(storage, {
-            "id": 100, "rating": "s",
-            "file": {"url": "https://static.example/100.png", "ext": "png", "md5": old_md5},
-            "sample": {}, "preview": {}, "tags": {}, "score": {},
-        })
-        storage.files.mark_downloaded(
-            100, ImageVariant.ORIGINAL,
-            local_path=local, bytes_written=14,
-            checksum=bytes.fromhex(old_md5),
-            downloaded_at=datetime.now(timezone.utc),
-        )
+    _seed_downloaded_original(config, md5=old_md5, exists=True)
 
     result = run_mirror(config, date="2026-05-18", e621=_MirrorE621(md5=new_md5), progress=_ProgressSpy())
 
     with open_storage(config.storage_path, read_only=True) as storage:
         jobs = storage.queue.list()
     assert result.image_jobs_queued == 1
-    assert jobs[0].kind == JobKind.DOWNLOAD_ORIGINAL
-    assert jobs[0].payload["post_id"] == 100
-    assert jobs[0].payload["expected_md5"] == new_md5
+    assert (jobs[0].kind, jobs[0].payload["post_id"], jobs[0].payload["expected_md5"]) == (JobKind.DOWNLOAD_ORIGINAL, 100, new_md5)
 
 
 def test_mirror_skips_current_downloaded_original(tmp_path: Path):
     # Post was downloaded and checksum already matches e621's current md5 → no re-download.
     current_md5 = "0123456789abcdef0123456789abcdef"
     config = SixTwoOneConfig(home=tmp_path / "home")
-    local = config.images_dir / "000000000100" / "original.png"
-    local.parent.mkdir(parents=True, exist_ok=True)
-    local.write_bytes(b"current image data")
-    with create_storage(config.storage_path) as storage:
-        import_test_posts(storage, {
-            "id": 100, "rating": "s",
-            "file": {"url": "https://static.example/100.png", "ext": "png", "md5": current_md5},
-            "sample": {}, "preview": {}, "tags": {}, "score": {},
-        })
-        storage.files.mark_downloaded(
-            100, ImageVariant.ORIGINAL,
-            local_path=local, bytes_written=18,
-            checksum=bytes.fromhex(current_md5),
-            downloaded_at=datetime.now(timezone.utc),
-        )
+    _seed_downloaded_original(config, md5=current_md5, exists=True)
 
     result = run_mirror(config, date="2026-05-18", e621=_MirrorE621(md5=current_md5), progress=_ProgressSpy())
 
@@ -217,19 +198,7 @@ def test_mirror_skips_stale_image_deleted_from_disk(tmp_path: Path):
     old_md5 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     new_md5 = "0123456789abcdef0123456789abcdef"
     config = SixTwoOneConfig(home=tmp_path / "home")
-    missing_path = config.images_dir / "000000000100" / "original.png"
-    with create_storage(config.storage_path) as storage:
-        import_test_posts(storage, {
-            "id": 100, "rating": "s",
-            "file": {"url": "https://static.example/100.png", "ext": "png", "md5": old_md5},
-            "sample": {}, "preview": {}, "tags": {}, "score": {},
-        })
-        storage.files.mark_downloaded(
-            100, ImageVariant.ORIGINAL,
-            local_path=missing_path, bytes_written=0,
-            checksum=bytes.fromhex(old_md5),
-            downloaded_at=datetime.now(timezone.utc),
-        )
+    _seed_downloaded_original(config, md5=old_md5, exists=False)
 
     result = run_mirror(config, date="2026-05-18", e621=_MirrorE621(md5=new_md5), progress=_ProgressSpy())
 
@@ -244,6 +213,33 @@ def test_mirror_reports_missing_export_date_without_traceback(tmp_path: Path):
 
     with pytest.raises(CommandError, match="No e621 DB export was found for 1900-01-01"):
         run_mirror(config, date="1900-01-01", e621=_MissingMirrorE621(), progress=_ProgressSpy())
+
+
+@dataclass(frozen=True, slots=True)
+class _MirrorWorld:
+    config: SixTwoOneConfig
+    result: object
+    progress: "_ProgressSpy"
+
+
+def _seed_downloaded_original(config: SixTwoOneConfig, *, md5: str, exists: bool) -> Path:
+    local = config.images_dir / "000000000100" / "original.png"
+    if exists:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(b"image data")
+    with create_storage(config.storage_path) as storage:
+        import_test_posts(storage, {
+            "id": 100, "rating": "s",
+            "file": {"url": "https://static.example/100.png", "ext": "png", "md5": md5},
+            "sample": {}, "preview": {}, "tags": {}, "score": {},
+        })
+        storage.files.mark_downloaded(
+            100, ImageVariant.ORIGINAL,
+            local_path=local, bytes_written=local.stat().st_size if local.exists() else 0,
+            checksum=bytes.fromhex(md5),
+            downloaded_at=datetime.now(timezone.utc),
+        )
+    return local
 
 
 class _ProgressSpy:

@@ -89,6 +89,9 @@ class EmptySearchManager:
     def search(self, **_: Any) -> SearchResult:
         return SearchResult([])
 
+    def for_post(self, *_: Any, **__: Any) -> SearchResult:
+        return SearchResult([])
+
 
 class FakePoolsManager:
     def __init__(self) -> None:
@@ -121,7 +124,21 @@ class FakeE621:
     def __init__(self, posts: list[dict[str, Any]] | None = None) -> None:
         self.posts = FakePostsManager(posts)
         self.comments = EmptySearchManager()
+        self.notes = EmptySearchManager()
+        self.note_versions = EmptySearchManager()
+        self.post_flags = EmptySearchManager()
+        self.post_events = EmptySearchManager()
+        self.post_versions = EmptySearchManager()
+        self.post_approvals = EmptySearchManager()
         self.pools = FakePoolsManager()
+        self.sets = EmptySearchManager()
+        self.post_replacements = EmptySearchManager()
+        self.favorites = EmptySearchManager()
+        self.post_votes = EmptySearchManager()
+        self.users = EmptySearchManager()
+        self.artists = EmptySearchManager()
+        self.artist_urls = EmptySearchManager()
+        self.artist_versions = EmptySearchManager()
         self.transport = DownloadTransport(bodies_by_url=_download_bodies(self.posts.posts))
 
 

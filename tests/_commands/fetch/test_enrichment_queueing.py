@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import patch
-
 import pytest
 
-from six2one._commands.fetch import run_fetch
+from six2one._commands.queue import run_queue
 from six2one._commands.queue.planning import LOCAL_DATA_DEPENDENCIES
 from six2one.queue.models import JobKind
 from six2one.storage import open_storage
@@ -200,8 +197,7 @@ def test_fetch_queues_required_enrichment_jobs(
     config = initialized_config(tmp_path)
     e621 = FakeE621(posts=[post_payload(1, tag="dragon"), post_payload(2, tag="dragon")])
 
-    with patch("six2one._commands.fetch.command.run_jobs", return_value=_idle_run_summary()):
-        result = run_fetch(config, query, limit=2, e621=e621)
+    result = run_queue(config, query, limit=2, e621=e621)
 
     with open_storage(config.storage_path, read_only=True) as storage:
         jobs = storage.queue.list(source_run_id=result.source_run_id)
@@ -214,8 +210,8 @@ def test_fetch_queues_required_enrichment_jobs(
         for job in expected_enrichment_jobs
         if job in {JobKind.ENRICH_USERS, JobKind.ENRICH_ARTISTS}
     )
-    assert result.discovery.enrichment_jobs == len(expected_immediate_jobs)
-    assert result.discovery.new_image_jobs == 0
+    assert result.summary.enrichment_jobs == len(expected_immediate_jobs)
+    assert result.summary.new_image_jobs == 0
     assert job_kinds.count(JobKind.FETCH_PAGE) == 1
     assert job_kinds.count(JobKind.EVALUATE_QUERY) == 0
     for job_kind in expected_immediate_jobs:
@@ -229,15 +225,14 @@ def test_fetch_skips_enrichment_jobs_when_coverage_is_ready(tmp_path):
     with open_storage(config.storage_path) as storage:
         storage.coverage.mark_ready(scope="post", keys=[1, 2], dependency="CommentsIndex")
 
-    with patch("six2one._commands.fetch.command.run_jobs", return_value=_idle_run_summary()):
-        result = run_fetch(config, "commenter:Bob", limit=2, e621=e621)
+    result = run_queue(config, "commenter:Bob", limit=2, e621=e621)
 
     with open_storage(config.storage_path, read_only=True) as storage:
         jobs = storage.queue.list(source_run_id=result.source_run_id)
 
     job_kinds = [job.kind for job in jobs]
     assert _remote_dependencies(result.data_dependencies) == ("CommentsIndex", "UserIndex")
-    assert result.discovery.enrichment_jobs == 1
+    assert result.summary.enrichment_jobs == 1
     assert JobKind.ENRICH_COMMENTS not in job_kinds
     assert JobKind.ENRICH_USERS in job_kinds
     assert JobKind.FETCH_PAGE in job_kinds
@@ -250,27 +245,16 @@ def test_fetch_enriches_remote_and_local_candidates_before_evaluation(tmp_path):
     with open_storage(config.storage_path) as storage:
         storage.imports.import_posts([post_payload(2, tag="dragon")])
 
-    with patch("six2one._commands.fetch.command.run_jobs", return_value=_idle_run_summary()):
-        result = run_fetch(config, "dragon commenter:Bob", limit=1, e621=e621)
+    result = run_queue(config, "dragon commenter:Bob", limit=1, e621=e621)
 
     with open_storage(config.storage_path, read_only=True) as storage:
         jobs = storage.queue.list(source_run_id=result.source_run_id)
 
     comments_job = next(job for job in jobs if job.kind is JobKind.ENRICH_COMMENTS)
     evaluate_job = next(job for job in jobs if job.kind is JobKind.EVALUATE_QUERY)
-    assert result.discovery.cached_posts == 1
+    assert result.summary.cached_posts == 1
     assert comments_job.payload["post_ids"] == [2]
     assert evaluate_job.payload["post_ids"] == [2]
-
-
-def _idle_run_summary():
-    return SimpleNamespace(
-        downloaded_images=0,
-        failed_image_jobs=0,
-        skipped_existing_files=0,
-        bytes_written=0,
-        paused_after_error=False,
-    )
 
 
 

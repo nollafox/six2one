@@ -16,70 +16,64 @@ from six2one.cli import main
 from six2one.e621.errors import E621APIError
 
 
-def test_top_level_help_includes_current_commands():
-    result = _run_cli("--help", raises=True)
+HELP_CONTRACTS = [
+    pytest.param(
+        ("--help",),
+        {
+            "Queue, enrich, and fetch e621 posts",
+            "auth",
+            "mirror",
+            'queue "dragon rating:s" --limit 10',
+            'export "dragon rating:s" -o ./dragon-export',
+            "fetch --queue",
+            "{bootstrap,auth,mirror,query,fetch,export,queue}",
+        },
+        {"    show ", "    prune "},
+        id="top-level",
+    ),
+    pytest.param(
+        ("fetch", "--help"),
+        {
+            "--limit",
+            "omit to process every",
+            "--file-type",
+            "default: original",
+            "--queue",
+            "--watch",
+            '621 export "dragon rating:s" -o ./dragon-export',
+            "After fetch completes, use export",
+        },
+        {"--size", "--out", "--dry-run", "--rating"},
+        id="fetch",
+    ),
+    pytest.param(
+        ("bootstrap", "--help"),
+        {"--migrate", "pending sqlite migrations"},
+        set(),
+        id="bootstrap",
+    ),
+    pytest.param(
+        ("queue", "--help"),
+        {"queue list", "queue clear --failed --yes", "queue amend", "--exclude", "--limit", "omit to process every"},
+        set(),
+        id="queue",
+    ),
+    pytest.param(
+        ("mirror", "--help"),
+        {"Mirror e621 DB exports", "--date"},
+        {"--keep-downloads"},
+        id="mirror",
+    ),
+]
+
+
+@pytest.mark.parametrize(("args", "expected", "forbidden"), HELP_CONTRACTS)
+def test_cli_help_contracts(args: tuple[str, ...], expected: set[str], forbidden: set[str]):
+    result = _run_cli(*args, raises=True)
 
     assert result.exit_code == 0
-    assert "Queue, enrich, and fetch e621 posts" in result.stdout
-    assert "auth" in result.stdout
-    assert "mirror" in result.stdout
-    assert 'queue "dragon rating:s" --limit 10' in result.stdout
-    assert 'export "dragon rating:s" -o ./dragon-export' in result.stdout
-    assert "fetch --queue" in result.stdout
-    assert "{bootstrap,auth,mirror,query,fetch,export,queue}" in result.stdout
-    assert not any(line.startswith("    show ") for line in result.stdout.splitlines())
-    assert not any(line.startswith("    prune ") for line in result.stdout.splitlines())
-    assert result.stderr == ""
-
-
-def test_fetch_help_keeps_limit_and_removes_legacy_options():
-    result = _run_cli("fetch", "--help", raises=True)
-
-    assert result.exit_code == 0
-    assert "--limit" in result.stdout
-    assert "omit to process every" in result.stdout
-    assert "--file-type" in result.stdout
-    assert "default: original" in result.stdout
-    assert "--queue" in result.stdout
-    assert "--watch" in result.stdout
-    assert '621 export "dragon rating:s" -o ./dragon-export' in result.stdout
-    assert "After fetch completes, use export" in result.stdout
-    assert "--size" not in result.stdout
-    assert "--out" not in result.stdout
-    assert "--dry-run" not in result.stdout
-    assert "--rating" not in result.stdout
-    assert result.stderr == ""
-
-
-def test_bootstrap_help_includes_migrate_flag():
-    result = _run_cli("bootstrap", "--help", raises=True)
-
-    assert result.exit_code == 0
-    assert "--migrate" in result.stdout
-    assert "pending sqlite migrations" in result.stdout
-    assert result.stderr == ""
-
-
-def test_queue_help_describes_management_commands():
-    result = _run_cli("queue", "--help", raises=True)
-
-    assert result.exit_code == 0
-    assert "queue list" in result.stdout
-    assert "queue clear --failed --yes" in result.stdout
-    assert "queue amend" in result.stdout
-    assert "--exclude" in result.stdout
-    assert "--limit" in result.stdout
-    assert "omit to process every" in result.stdout
-    assert result.stderr == ""
-
-
-def test_mirror_help_describes_export_mirroring():
-    result = _run_cli("mirror", "--help", raises=True)
-
-    assert result.exit_code == 0
-    assert "Mirror e621 DB exports" in result.stdout
-    assert "--date" in result.stdout
-    assert "--keep-downloads" not in result.stdout
+    assert expected <= set(_contained_strings(result.stdout, expected))
+    assert _forbidden_matches(result.stdout, forbidden) == ()
     assert result.stderr == ""
 
 
@@ -298,6 +292,22 @@ def _run_cli(*args: str, raises: bool = False) -> _CliResult:
             exit_code = asyncio.run(main(args, prog="621"))
 
     return _CliResult(exit_code=exit_code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
+
+
+def _contained_strings(output: str, values: set[str]) -> tuple[str, ...]:
+    return tuple(value for value in values if value in output)
+
+
+def _forbidden_matches(output: str, values: set[str]) -> tuple[str, ...]:
+    lines = output.splitlines()
+    matches: list[str] = []
+    for value in values:
+        if value.startswith(" "):
+            if any(line.startswith(value) for line in lines):
+                matches.append(value)
+        elif value in output:
+            matches.append(value)
+    return tuple(matches)
 
 
 def _fetch_result() -> FetchCommandResult:

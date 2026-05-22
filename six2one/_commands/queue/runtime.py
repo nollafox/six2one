@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Iterable
@@ -14,6 +14,31 @@ from six2one.storage.models import QueueJobId
 from six2one.storage.stores import Storage
 
 from .planning import _DOWNLOAD_JOB_KINDS
+
+PROGRESS_RATE_REFRESH_SECONDS = 0.5
+_E621_JOB_KINDS = frozenset(
+    (
+        JobKind.FETCH_PAGE,
+        JobKind.ENRICH_POSTS,
+        JobKind.ENRICH_USERS,
+        JobKind.ENRICH_COMMENTS,
+        JobKind.ENRICH_NOTES,
+        JobKind.ENRICH_NOTE_VERSIONS,
+        JobKind.ENRICH_POST_FLAGS,
+        JobKind.ENRICH_POST_EVENTS,
+        JobKind.ENRICH_POST_VERSIONS,
+        JobKind.ENRICH_POST_APPROVALS,
+        JobKind.ENRICH_POOLS,
+        JobKind.ENRICH_SETS,
+        JobKind.ENRICH_REPLACEMENTS,
+        JobKind.ENRICH_FAVORITES,
+        JobKind.ENRICH_POST_VOTES,
+        JobKind.ENRICH_ARTISTS,
+        JobKind.ENRICH_ARTIST_URLS,
+        JobKind.ENRICH_ARTIST_VERSIONS,
+        *_DOWNLOAD_JOB_KINDS,
+    )
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,19 +97,16 @@ def run_jobs(
             records = _runnable_jobs(storage, source_run_id=source_run_id, retry_failed=retry_failed, image_only=image_only)
             if not records:
                 break
-            highest_priority = records[0].priority
-            records = [record for record in records if record.priority == highest_priority]
-
+            ready_total = len(records)
             remaining = None if max_jobs is None else max(0, max_jobs - attempted)
             if remaining == 0:
                 break
-            batch_size = min(worker_count, len(records), remaining or len(records))
-            batch = records[:batch_size]
+            batch = _select_worker_batch(records, worker_count=worker_count, remaining=remaining)
+            visible_total = ready_total if remaining is None else min(ready_total, remaining)
             if bar is None and progress is not None:
-                total = len(batch) if max_jobs is None else min(len(batch), max_jobs)
-                bar = progress(None, desc="Processing queued jobs", total=total, unit="job", leave=False)
+                bar = progress(None, desc="Processing queued jobs", total=visible_total, unit="job", leave=False)
             elif bar is not None:
-                _progress_set_total(bar, attempted + len(batch))
+                _progress_set_total(bar, attempted + visible_total)
 
             jobs: list[tuple[QueueJobId, JobKind, bool]] = []
             for index, record in enumerate(batch):
@@ -94,32 +116,48 @@ def run_jobs(
                 refreshed = _mark_running(storage, record.id, worker_id=f"command-{index + 1}")
                 jobs.append((refreshed.id, refreshed.kind, record.state is JobState.FAILED))
 
-            _progress_set_description(bar, f"Running {len(jobs)} queued job{'s' if len(jobs) != 1 else ''}")
+            _progress_set_description(bar, _batch_description(jobs, ready_total=ready_total))
+            _progress_set_request_rate(
+                bar,
+                e621,
+                active_e621_jobs=_e621_job_count(kind for _id, kind, _was_failed in jobs),
+            )
             with ThreadPoolExecutor(max_workers=min(worker_count, len(jobs)), thread_name_prefix="six2one-queue") as executor:
-                futures = [
+                futures = {
                     executor.submit(
                         _run_leased_job,
                         storage.database.config,
                         e621,
                         settings,
                         job_id,
+                    ): kind
+                    for job_id, kind, _was_failed in jobs
+                }
+                pending = set(futures)
+                while pending:
+                    done, pending = wait(
+                        pending,
+                        timeout=PROGRESS_RATE_REFRESH_SECONDS,
+                        return_when=FIRST_COMPLETED,
                     )
-                    for job_id, _kind, _was_failed in jobs
-                ]
-                for future in as_completed(futures):
-                    outcome = future.result()
-                    if outcome.completed:
-                        completed += 1
-                        completed_ids.append(outcome.job_id)
-                        if outcome.kind in _DOWNLOAD_JOB_KINDS:
-                            downloaded += 1
-                            bytes_written += outcome.bytes_written
-                    else:
-                        failed += 1
-                        failed_ids.append(outcome.job_id)
-                        if outcome.kind in _DOWNLOAD_JOB_KINDS:
-                            failed_images += 1
-                    _progress_update(bar)
+                    if pending:
+                        _progress_set_request_rate(bar, e621, active_e621_jobs=_pending_e621_job_count(pending, futures))
+                    for future in done:
+                        outcome = future.result()
+                        if outcome.completed:
+                            completed += 1
+                            completed_ids.append(outcome.job_id)
+                            if outcome.kind in _DOWNLOAD_JOB_KINDS:
+                                downloaded += 1
+                                bytes_written += outcome.bytes_written
+                        else:
+                            failed += 1
+                            failed_ids.append(outcome.job_id)
+                            if outcome.kind in _DOWNLOAD_JOB_KINDS:
+                                failed_images += 1
+                        _progress_update(bar)
+                        if pending:
+                            _progress_set_request_rate(bar, e621, active_e621_jobs=_pending_e621_job_count(pending, futures))
     finally:
         _progress_close(bar)
 
@@ -183,6 +221,94 @@ def _worker_count(settings: Any | None) -> int:
     return max(1, value)
 
 
+def _select_worker_batch(records, *, worker_count: int, remaining: int | None):
+    """Choose a batch without letting local work starve e621 requests.
+
+    Dependency-sensitive jobs still lead by priority phase. When that phase is
+    local evaluation, ready e621 jobs fill most of the pool so the shared API
+    gate stays busy while evaluation continues in parallel.
+    """
+
+    capacity = min(worker_count, len(records), remaining or len(records))
+    if capacity <= 0:
+        return ()
+
+    highest_priority = records[0].priority
+    priority_records = [record for record in records if record.priority == highest_priority]
+    lower_e621_records = [
+        record
+        for record in records
+        if record.priority != highest_priority and _uses_e621(record.kind)
+    ]
+
+    if lower_e621_records and not any(_uses_e621(record.kind) for record in priority_records):
+        local_capacity = min(len(priority_records), 1)
+        batch = priority_records[:local_capacity]
+    else:
+        batch = priority_records[:capacity]
+
+    if len(batch) >= capacity:
+        return tuple(batch)
+
+    selected_ids = {record.id for record in batch}
+    for record in lower_e621_records:
+        if record.id in selected_ids:
+            continue
+        batch.append(record)
+        selected_ids.add(record.id)
+        if len(batch) >= capacity:
+            break
+    return tuple(batch)
+
+
+def _batch_description(jobs: list[tuple[QueueJobId, JobKind, bool]], *, ready_total: int) -> str:
+    count = len(jobs)
+    families = _job_family_counts(kind for _id, kind, _was_failed in jobs)
+    if not families:
+        summary = "queued jobs"
+    elif len(families) == 1:
+        family, family_count = families[0]
+        summary = f"{family_count} {family} job{'s' if family_count != 1 else ''}"
+    else:
+        summary = " + ".join(
+            f"{family_count} {family} job{'s' if family_count != 1 else ''}"
+            for family, family_count in families
+        )
+    return f"Running {summary} ({count:,} active / {ready_total:,} ready)"
+
+
+def _job_family_counts(kinds: Iterable[JobKind]) -> list[tuple[str, int]]:
+    order = ("page discovery", "enrichment", "evaluation", "image", "queued")
+    counts = {name: 0 for name in order}
+    for kind in kinds:
+        counts[_job_family(kind)] += 1
+    return [(family, counts[family]) for family in order if counts[family]]
+
+
+def _job_family(kind: JobKind) -> str:
+    if kind is JobKind.FETCH_PAGE:
+        return "page discovery"
+    if kind.name.startswith("ENRICH_"):
+        return "enrichment"
+    if kind is JobKind.EVALUATE_QUERY:
+        return "evaluation"
+    if kind in _DOWNLOAD_JOB_KINDS:
+        return "image"
+    return "queued"
+
+
+def _e621_job_count(kinds: Iterable[JobKind]) -> int:
+    return sum(1 for kind in kinds if _uses_e621(kind))
+
+
+def _pending_e621_job_count(pending: Iterable[Any], future_kinds: dict[Any, JobKind]) -> int:
+    return _e621_job_count(future_kinds[future] for future in pending)
+
+
+def _uses_e621(kind: JobKind) -> bool:
+    return kind in _E621_JOB_KINDS
+
+
 def _runnable_jobs(
     storage: Storage,
     *,
@@ -232,6 +358,33 @@ def _progress_set_total(bar: Any | None, total: int) -> None:
         bar.total = total
         if hasattr(bar, "refresh"):
             bar.refresh()
+
+
+def _progress_set_request_rate(bar: Any | None, e621: Any, *, active_e621_jobs: int) -> None:
+    if bar is None:
+        return
+    if active_e621_jobs <= 0:
+        text = "e621 idle"
+        if hasattr(bar, "set_postfix_str"):
+            bar.set_postfix_str(text, refresh=True)
+        elif hasattr(bar, "set_postfix"):
+            bar.set_postfix({"e621": "idle"}, refresh=True)
+        return
+    rate = _request_rate(e621)
+    if rate is None:
+        return
+    text = f"e621 {rate:.2f} req/s, {active_e621_jobs} net"
+    if hasattr(bar, "set_postfix_str"):
+        bar.set_postfix_str(text, refresh=True)
+    elif hasattr(bar, "set_postfix"):
+        bar.set_postfix({"e621": f"{rate:.2f} req/s"}, refresh=True)
+
+
+def _request_rate(e621: Any) -> float | None:
+    limiter = getattr(getattr(e621, "transport", None), "rate_limiter", None)
+    if limiter is None or not hasattr(limiter, "requests_per_second"):
+        return None
+    return float(limiter.requests_per_second())
 
 
 def human_bytes(size: int) -> str:

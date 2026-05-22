@@ -330,13 +330,14 @@ class SearchRepository(BaseRepository):
 
     def bitmap(self, key: BitmapKey) -> BitMap:
         self._require_queryable_index()
-        base = BitmapIndexStore(self.config.base_lmdb, map_size_bytes=self.config.map_size_bytes, readonly=True)
-        delta = BitmapIndexStore(self.config.delta_lmdb, map_size_bytes=self.config.map_size_bytes, readonly=True)
-        try:
-            return base.get(key) | delta.get(key)
-        finally:
-            base.close()
-            delta.close()
+        with _INDEX_WRITE_LOCK:
+            base = BitmapIndexStore(self.config.base_lmdb, map_size_bytes=self.config.map_size_bytes, readonly=True)
+            delta = BitmapIndexStore(self.config.delta_lmdb, map_size_bytes=self.config.map_size_bytes, readonly=True)
+            try:
+                return base.get(key) | delta.get(key)
+            finally:
+                base.close()
+                delta.close()
 
     def all_posts_bitmap(self) -> BitMap:
         return self.bitmap(BitmapKey("all", "posts"))

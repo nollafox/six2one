@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from six2one.query import E621QueryLanguage
 from six2one.storage import IndexRebuildRequired
 from six2one.storage.models import PostLoad
+from six2one.storage.stores import Storage
 from tests.factories import post_payload
 from tests.support import make_post
 
@@ -74,3 +77,16 @@ def test_search_index_manifest_mismatch_fails_loudly(store):
 
     with pytest.raises(IndexRebuildRequired):
         store.posts.search(_compile(store, "dragon")).ids()
+
+
+def test_search_index_can_be_read_from_multiple_worker_stores(store):
+    store.imports.import_posts([post_payload(post_id, tag="dragon") for post_id in range(1, 9)])
+
+    def search_ids() -> tuple[int, ...]:
+        with Storage.open(store.database.config, provision_search=False) as worker_store:
+            return worker_store.posts.search(_compile(worker_store, "dragon")).ids()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = tuple(executor.map(lambda _: search_ids(), range(4)))
+
+    assert all(set(result) == set(range(1, 9)) for result in results)

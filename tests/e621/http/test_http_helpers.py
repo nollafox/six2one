@@ -3,6 +3,7 @@ import pytest
 from six2one.e621.http.auth import basic_auth_header
 from six2one.e621.http.rate_limit import RateLimiter
 from six2one.e621.http.retry import RetryPolicy
+from six2one.e621.http.transport import _partial_path
 from six2one.e621.http.response import ResponseInfo, raise_for_status
 from six2one.e621.errors import E621AuthError, E621PermissionError, E621NotFoundError, E621RateLimitError
 
@@ -44,6 +45,17 @@ def test_retry_policy():
     policy = RetryPolicy(max_retries=2)
     assert policy.should_retry(429, 0)
     assert not policy.should_retry(429, 2)
+
+
+def test_download_partial_paths_are_unique(tmp_path):
+    destination = tmp_path / "original.webp"
+
+    first = _partial_path(destination)
+    second = _partial_path(destination)
+
+    assert first != second
+    assert first.parent == destination.parent
+    assert first.name.endswith(".part")
 
 
 def test_response_error_mapping():

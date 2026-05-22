@@ -11,13 +11,14 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from six2one.e621 import E621Client
-from six2one.queue.models import JobKind, JobState
+from six2one.queue.models import JobState
 from six2one.storage import open_storage
 from six2one.storage.models import SourceRunId
 
 from six2one._commands.config import SixTwoOneConfig
 from six2one._commands.errors import CommandError
 
+from .metrics import active_source_run_metrics, queue_status_metrics, source_run_metrics
 from .planning import _DOWNLOAD_JOB_KINDS, _bound_query_metadata, _canonical_query, compile_query, locally_matching_post_ids, queue_query_work
 
 SourceRunState = Literal["pending", "downloading", "paused", "success"]
@@ -36,6 +37,7 @@ class QueueRunSummary:
     skipped: int = 0
     failed_page_jobs: int = 0
     enrichment_jobs: int = 0
+    evaluation_jobs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +54,12 @@ class QueueCommandResult:
 
     @property
     def queued_anything(self) -> bool:
-        return self.summary.page_jobs > 0 or self.summary.new_image_jobs > 0 or self.summary.enrichment_jobs > 0
+        return (
+            self.summary.page_jobs > 0
+            or self.summary.new_image_jobs > 0
+            or self.summary.enrichment_jobs > 0
+            or self.summary.evaluation_jobs > 0
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +69,10 @@ class QueueStatus:
     active_source_runs: int = 0
     pending_jobs: int = 0
     failed_jobs: int = 0
+    pending_page_jobs: int = 0
+    failed_page_jobs: int = 0
+    pending_evaluation_jobs: int = 0
+    failed_evaluation_jobs: int = 0
     pending_enrichment_jobs: int = 0
     failed_enrichment_jobs: int = 0
     pending_image_jobs: int = 0
@@ -80,10 +91,21 @@ class SourceRunQueueSummary:
     state: SourceRunState
     discovered_pages: int | None = None
     cached_posts: int = 0
+    already_queued: int = 0
+    already_downloaded: int = 0
+    skipped: int = 0
     pending_image_jobs: int = 0
     failed_image_jobs: int = 0
+    total_page_jobs: int = 0
+    pending_page_jobs: int = 0
+    failed_page_jobs: int = 0
+    total_evaluation_jobs: int = 0
+    pending_evaluation_jobs: int = 0
+    failed_evaluation_jobs: int = 0
+    total_enrichment_jobs: int = 0
     pending_enrichment_jobs: int = 0
     failed_enrichment_jobs: int = 0
+    total_image_jobs: int = 0
     downloaded_images: int = 0
     removed_image_jobs: int = 0
     pending_jobs: int = 0
@@ -132,6 +154,9 @@ class QueueClearPreview:
     target: str | None = None
     failed_only: bool = False
     source_runs_affected: int = 0
+    pending_jobs: int = 0
+    failed_jobs: int = 0
+    matching_jobs: int = 0
     pending_image_jobs: int = 0
     failed_image_jobs: int = 0
     matching_image_jobs: int = 0
@@ -201,6 +226,7 @@ def run_queue(
             limit=limit,
             progress=progress,
         )
+        run_metrics = source_run_metrics(storage, plan.source_run_id)
 
     return QueueCommandResult(
         query=query,
@@ -208,16 +234,7 @@ def run_queue(
         backend_images=f"local:{config.images_dir}",
         image_variant=plan.image_variant,
         data_dependencies=plan.dependencies,
-        summary=QueueRunSummary(
-            discovered_pages=plan.counts.discovered_pages,
-            cached_posts=plan.counts.cached_posts,
-            page_jobs=plan.counts.page_jobs,
-            new_image_jobs=plan.counts.new_image_jobs,
-            already_queued=plan.counts.already_queued,
-            already_downloaded=plan.counts.already_downloaded,
-            skipped=plan.counts.skipped,
-            enrichment_jobs=plan.counts.enrichment_jobs,
-        ),
+        summary=_queue_run_summary(run_metrics) if run_metrics is not None else _queue_run_summary_from_plan(plan),
         )
 
 
@@ -342,18 +359,22 @@ def run_queue_clear(
         return backend.queue_clear(config, target=target, failed=failed, yes=yes)
 
     with open_storage(config.storage_path) as storage:
-        jobs = _clearable_image_jobs(storage, target=target, failed_only=failed)
+        jobs = _clearable_jobs(storage, target=target, failed_only=failed)
         source_ids = {job.source_run_id for job in jobs if job.source_run_id}
         pending = sum(1 for job in jobs if job.state in {JobState.READY, JobState.LEASED})
         failed_count = sum(1 for job in jobs if job.state is JobState.FAILED)
+        image_jobs = [job for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS]
         source_run = _source_run_summary(storage, target) if target and target.isdigit() else None
         preview = QueueClearPreview(
             target=target,
             failed_only=failed,
             source_runs_affected=len(source_ids),
-            pending_image_jobs=pending,
-            failed_image_jobs=failed_count,
-            matching_image_jobs=len(jobs),
+            pending_jobs=pending,
+            failed_jobs=failed_count,
+            matching_jobs=len(jobs),
+            pending_image_jobs=sum(1 for job in image_jobs if job.state in {JobState.READY, JobState.LEASED}),
+            failed_image_jobs=sum(1 for job in image_jobs if job.state is JobState.FAILED),
+            matching_image_jobs=len(image_jobs),
             cached_post_json=len(storage.posts.list_ids()),
             downloaded_images=_downloaded_image_count(storage),
             source_run=source_run,
@@ -380,76 +401,100 @@ def _create_e621_client(config: SixTwoOneConfig) -> E621Client:
 
 
 def _queue_list_from_storage(storage, *, failed: bool, compact: bool) -> QueueListResult:
-    jobs = storage.queue.list()
-    image_jobs = [job for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS]
-    enrichment_jobs = [job for job in jobs if job.kind in _ENRICHMENT_JOB_KINDS]
-    source_runs = storage.source_runs.list()
-    active_source_ids = {
-        job.source_run_id
-        for job in jobs
-        if job.source_run_id and job.state in {JobState.READY, JobState.LEASED, JobState.FAILED}
-    }
-    runs = tuple(
-        _source_run_summary(storage, run.id)
-        for run in source_runs
-        if run.id in active_source_ids
-    )
+    status_metrics = queue_status_metrics(storage)
+    runs = tuple(_source_run_summary_from_metrics(metrics) for metrics in active_source_run_metrics(storage))
     failed_runs = tuple(_failed_group(storage, run) for run in runs if run.failed_image_jobs > 0)
     failed_runs = tuple(group for group in failed_runs if group.jobs)
-    status = QueueStatus(
-        active_source_runs=len(active_source_ids),
-        pending_jobs=sum(1 for job in jobs if job.state in {JobState.READY, JobState.LEASED}),
-        failed_jobs=sum(1 for job in jobs if job.state is JobState.FAILED),
-        pending_enrichment_jobs=sum(1 for job in enrichment_jobs if job.state in {JobState.READY, JobState.LEASED}),
-        failed_enrichment_jobs=sum(1 for job in enrichment_jobs if job.state is JobState.FAILED),
-        pending_image_jobs=sum(1 for job in image_jobs if job.state in {JobState.READY, JobState.LEASED}),
-        failed_image_jobs=sum(1 for job in image_jobs if job.state is JobState.FAILED),
-        downloaded_images=_downloaded_image_count(storage),
-        cached_post_json=len(storage.posts.list_ids()),
-        last_updated=str(max((run.updated_ms for run in source_runs), default="")) or None,
-    )
+    status = _queue_status_from_metrics(status_metrics)
     return QueueListResult(status=status, runs=runs, failed_runs=failed_runs, failed_only=failed, compact=compact)
 
 
 def _source_run_summary(storage, source_run_id: str | int | SourceRunId | None) -> SourceRunQueueSummary | None:
-    if source_run_id is None:
-        return None
-    try:
-        run_id = SourceRunId(int(source_run_id))
-        run = storage.source_runs.get(run_id)
-    except (KeyError, ValueError):
-        return None
-    jobs = storage.queue.list(source_run_id=run_id)
-    image_jobs = [job for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS]
-    enrichment_jobs = [job for job in jobs if job.kind in _ENRICHMENT_JOB_KINDS]
-    pending_image = sum(1 for job in image_jobs if job.state in {JobState.READY, JobState.LEASED})
-    failed_image = sum(1 for job in image_jobs if job.state is JobState.FAILED)
-    pending_enrichment = sum(1 for job in enrichment_jobs if job.state in {JobState.READY, JobState.LEASED})
-    failed_enrichment = sum(1 for job in enrichment_jobs if job.state is JobState.FAILED)
-    downloaded = sum(1 for job in image_jobs if job.state is JobState.DONE)
-    pending_jobs = sum(1 for job in jobs if job.state in {JobState.READY, JobState.LEASED})
-    failed_jobs = sum(1 for job in jobs if job.state is JobState.FAILED)
-    state: SourceRunState = "success"
-    if failed_jobs:
-        state = "paused"
-    elif pending_jobs:
-        state = "pending"
+    metrics = source_run_metrics(storage, source_run_id)
+    return _source_run_summary_from_metrics(metrics) if metrics is not None else None
+
+
+def _queue_run_summary(metrics) -> QueueRunSummary:
+    return QueueRunSummary(
+        discovered_pages=metrics.discovered_pages,
+        cached_posts=metrics.cached_posts,
+        page_jobs=metrics.total_page_jobs,
+        new_image_jobs=metrics.total_image_jobs,
+        already_queued=metrics.already_queued,
+        already_downloaded=metrics.already_downloaded,
+        skipped=metrics.skipped,
+        failed_page_jobs=metrics.failed_page_jobs,
+        enrichment_jobs=metrics.total_enrichment_jobs,
+        evaluation_jobs=metrics.total_evaluation_jobs,
+    )
+
+
+def _queue_run_summary_from_plan(plan) -> QueueRunSummary:
+    return QueueRunSummary(
+        discovered_pages=plan.counts.discovered_pages,
+        cached_posts=plan.counts.cached_posts,
+        page_jobs=plan.counts.page_jobs,
+        new_image_jobs=plan.counts.new_image_jobs,
+        already_queued=plan.counts.already_queued,
+        already_downloaded=plan.counts.already_downloaded,
+        skipped=plan.counts.skipped,
+        failed_page_jobs=plan.counts.failed_page_jobs,
+        enrichment_jobs=plan.counts.enrichment_jobs,
+        evaluation_jobs=plan.counts.evaluation_jobs,
+    )
+
+
+def _queue_status_from_metrics(metrics) -> QueueStatus:
+    return QueueStatus(
+        active_source_runs=metrics.active_source_runs,
+        pending_jobs=metrics.pending_jobs,
+        failed_jobs=metrics.failed_jobs,
+        pending_page_jobs=metrics.pending_page_jobs,
+        failed_page_jobs=metrics.failed_page_jobs,
+        pending_evaluation_jobs=metrics.pending_evaluation_jobs,
+        failed_evaluation_jobs=metrics.failed_evaluation_jobs,
+        pending_enrichment_jobs=metrics.pending_enrichment_jobs,
+        failed_enrichment_jobs=metrics.failed_enrichment_jobs,
+        pending_image_jobs=metrics.pending_image_jobs,
+        failed_image_jobs=metrics.failed_image_jobs,
+        downloaded_images=metrics.downloaded_images,
+        cached_post_json=metrics.cached_post_json,
+        last_updated=metrics.last_updated,
+    )
+
+
+def _source_run_summary_from_metrics(metrics) -> SourceRunQueueSummary:
     return SourceRunQueueSummary(
-        id=str(int(run.id)),
-        query=run.query,
-        state=state,
-        discovered_pages=None,
-        cached_posts=run.total_candidates or 0,
-        pending_image_jobs=pending_image,
-        failed_image_jobs=failed_image,
-        pending_enrichment_jobs=pending_enrichment,
-        failed_enrichment_jobs=failed_enrichment,
-        downloaded_images=downloaded,
-        pending_jobs=pending_jobs,
-        failed_jobs=failed_jobs,
-        added=str(run.created_ms),
+        id=metrics.id,
+        query=metrics.query,
+        state=metrics.state,
+        discovered_pages=metrics.discovered_pages,
+        cached_posts=metrics.cached_posts,
+        already_queued=metrics.already_queued,
+        already_downloaded=metrics.already_downloaded,
+        skipped=metrics.skipped,
+        total_page_jobs=metrics.total_page_jobs,
+        pending_page_jobs=metrics.pending_page_jobs,
+        failed_page_jobs=metrics.failed_page_jobs,
+        total_evaluation_jobs=metrics.total_evaluation_jobs,
+        pending_evaluation_jobs=metrics.pending_evaluation_jobs,
+        failed_evaluation_jobs=metrics.failed_evaluation_jobs,
+        total_enrichment_jobs=metrics.total_enrichment_jobs,
+        pending_image_jobs=metrics.pending_image_jobs,
+        failed_image_jobs=metrics.failed_image_jobs,
+        pending_enrichment_jobs=metrics.pending_enrichment_jobs,
+        failed_enrichment_jobs=metrics.failed_enrichment_jobs,
+        total_image_jobs=metrics.total_image_jobs,
+        downloaded_images=metrics.downloaded_images,
+        removed_image_jobs=metrics.removed_image_jobs,
+        pending_jobs=metrics.pending_jobs,
+        failed_jobs=metrics.failed_jobs,
+        added=metrics.added,
         backend="web → sqlite",
-        last_error=next((job.last_error for job in jobs if job.last_error), None),
+        cache_ttl=metrics.cache_ttl,
+        current_image=metrics.current_image,
+        last_error=metrics.last_error,
+        retry_after=metrics.retry_after,
     )
 
 
@@ -470,11 +515,12 @@ def _failed_group(storage, run: SourceRunQueueSummary) -> FailedSourceRunSummary
     return FailedSourceRunSummary(source_run=run, jobs=tuple(failed_images))
 
 
-def _clearable_image_jobs(storage, *, target: str | None, failed_only: bool):
+def _clearable_jobs(storage, *, target: str | None, failed_only: bool):
     states = (JobState.FAILED,) if failed_only else (JobState.READY, JobState.LEASED, JobState.FAILED)
     source_run_id = SourceRunId(int(target)) if target and target.isdigit() else None
-    jobs = [job for job in storage.queue.list(states=states, source_run_id=source_run_id) if job.kind in _DOWNLOAD_JOB_KINDS]
+    jobs = list(storage.queue.list(states=states, source_run_id=source_run_id))
     if target and not target.isdigit():
+        jobs = [job for job in jobs if job.kind in _DOWNLOAD_JOB_KINDS]
         post_ids = _locally_matching_post_ids(
             storage,
             target,
@@ -496,26 +542,3 @@ def _amended_query(query: str, exclude: str) -> str:
 
 def _downloaded_image_count(storage) -> int:
     return storage.files.downloaded_count()
-
-
-_ENRICHMENT_JOB_KINDS = frozenset(
-    (
-        JobKind.ENRICH_POSTS,
-        JobKind.ENRICH_USERS,
-        JobKind.ENRICH_COMMENTS,
-        JobKind.ENRICH_NOTES,
-        JobKind.ENRICH_NOTE_VERSIONS,
-        JobKind.ENRICH_POST_FLAGS,
-        JobKind.ENRICH_POST_EVENTS,
-        JobKind.ENRICH_POST_VERSIONS,
-        JobKind.ENRICH_POST_APPROVALS,
-        JobKind.ENRICH_POOLS,
-        JobKind.ENRICH_SETS,
-        JobKind.ENRICH_REPLACEMENTS,
-        JobKind.ENRICH_FAVORITES,
-        JobKind.ENRICH_POST_VOTES,
-        JobKind.ENRICH_ARTISTS,
-        JobKind.ENRICH_ARTIST_URLS,
-        JobKind.ENRICH_ARTIST_VERSIONS,
-    )
-)

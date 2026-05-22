@@ -41,8 +41,10 @@ def test_queue_list_surfaces_pending_enrichment_jobs(commenter_queue: "_Commente
     rendered = format_queue_list(listed)
 
     assert (listed.status.pending_enrichment_jobs, listed.runs[0].pending_enrichment_jobs) == (2, 2)
+    assert (listed.runs[0].discovered_pages, listed.runs[0].pending_evaluation_jobs) == (1, 1)
     assert "Pending enrichment jobs" in rendered
     assert "pending enrichment jobs" in rendered
+    assert "pending evaluation jobs" in rendered
 
 
 def test_queue_enrichment_caches_sidecar_data_before_download(commenter_queue: "_CommenterQueue"):

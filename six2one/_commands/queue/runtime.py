@@ -148,8 +148,11 @@ def run_jobs(
                             completed += 1
                             completed_ids.append(outcome.job_id)
                             if outcome.kind in _DOWNLOAD_JOB_KINDS:
-                                downloaded += 1
-                                bytes_written += outcome.bytes_written
+                                if outcome.skipped_existing:
+                                    skipped_existing += 1
+                                else:
+                                    downloaded += 1
+                                    bytes_written += outcome.bytes_written
                         else:
                             failed += 1
                             failed_ids.append(outcome.job_id)
@@ -182,6 +185,7 @@ class _JobOutcome:
     kind: JobKind
     completed: bool
     bytes_written: int = 0
+    skipped_existing: bool = False
 
 
 def _run_leased_job(storage_config: Any, e621: Any, settings: Any, job_id: QueueJobId) -> _JobOutcome:
@@ -204,11 +208,13 @@ def _run_leased_job(storage_config: Any, e621: Any, settings: Any, job_id: Queue
                 )
             worker_storage.queue.complete(record.id, metadata=result.metadata, message=result.message)
             byte_value = result.metadata.get("bytes") if isinstance(result.metadata, dict) else None
+            skipped_existing = bool(result.metadata.get("skipped_existing")) if isinstance(result.metadata, dict) else False
             return _JobOutcome(
                 job_id=str(record.id),
                 kind=record.kind,
                 completed=True,
                 bytes_written=byte_value if isinstance(byte_value, int) else 0,
+                skipped_existing=skipped_existing,
             )
         except Exception as error:  # pragma: no cover - exercised by integration failures
             message = "".join(traceback.format_exception_only(type(error), error)).strip()

@@ -49,8 +49,20 @@ class DownloadImageJob(Job):
         if context.e621 is None:
             raise RuntimeError("DownloadImageJob requires context.e621")
 
+        image_variant = _variant_from_value(variant)
         path = Path(destination).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
+        if context.store.files.exists(post_id, image_variant) and path.exists():
+            return JobResult(
+                message=f"Skipped existing {variant} image for post {post_id}",
+                metadata={
+                    "post_id": post_id,
+                    "variant": variant,
+                    "local_path": str(path),
+                    "bytes": 0,
+                    "skipped_existing": True,
+                },
+            )
 
         # e621 transport accepts either a file path or a directory depending on implementation;
         # pass the exact target path and record the returned final path.
@@ -62,7 +74,6 @@ class DownloadImageJob(Job):
             downloaded.unlink(missing_ok=True)
             raise RuntimeError(f"Downloaded image checksum mismatch for post {post_id}: expected {expected}, got {checksum}")
 
-        image_variant = _variant_from_value(variant)
         context.store.files.mark_downloaded(
             post_id,
             variant=image_variant,

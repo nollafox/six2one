@@ -7,9 +7,10 @@ from pathlib import Path
 from six2one._commands.queue.runtime import _select_worker_batch, run_jobs
 from six2one.queue import Queue, default_registry
 from six2one.queue.models import JobKind, JobState
-from six2one.storage.models import Claimed, NothingReady
+from six2one.storage.models import Claimed, ImageVariant, NothingReady
 from six2one.storage.models import QueueJob, QueueJobId, QueuePayloadId
 from six2one.storage.models.time import utc_now_ms
+from tests.factories import post_payload
 
 
 def test_queue_payload_must_be_json_serializable(store):
@@ -172,6 +173,32 @@ def test_worker_batch_keeps_e621_busy_during_local_evaluation_phase():
 
     assert [job.kind for job in batch].count(JobKind.EVALUATE_QUERY) == 1
     assert [job.kind for job in batch].count(JobKind.DOWNLOAD_ORIGINAL) == 7
+
+
+def test_run_jobs_skips_existing_downloaded_file_without_network(store, fake_e621, tmp_path):
+    store.imports.import_posts([post_payload(1)])
+    path = tmp_path / "images" / "000000000001" / "original.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"already here")
+    store.files.mark_downloaded(
+        1,
+        ImageVariant.ORIGINAL,
+        local_path=path,
+        bytes_written=path.stat().st_size,
+        checksum=b"",
+        downloaded_at=datetime.now(timezone.utc),
+    )
+    source = store.source_runs.start(query="dragon")
+    store.queue.enqueue(
+        JobKind.DOWNLOAD_ORIGINAL,
+        {"post_id": 1, "variant": "original", "source_url": "https://static.example/1.png", "destination": str(path)},
+        source_run_id=source.id,
+    )
+
+    summary = run_jobs(storage=store, e621=fake_e621, source_run_id=source.id)
+
+    assert summary.skipped_existing_files == 1
+    assert fake_e621.transport.downloads == []
 
 
 def test_run_jobs_progress_reports_e621_request_rate(store, fake_e621, tmp_path):

@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 import time
+from uuid import uuid4
 
 from .auth import basic_auth_header
 from .rate_limit import RateLimiter
@@ -190,7 +191,7 @@ class Transport:
             request_headers["Authorization"] = auth_header
 
         request = Request(url, method="GET", headers=request_headers)
-        partial = destination.with_name(destination.name + ".part")
+        partial = _partial_path(destination)
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 headers_dict = {key: value for key, value in response.headers.items()}
@@ -255,6 +256,10 @@ def _content_length(headers: dict[str, str]) -> int | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _partial_path(destination: Path) -> Path:
+    return destination.with_name(f"{destination.name}.{uuid4().hex}.part")
 
 
 def _progress_bar(progress: Any | None, *, total: int | None, desc: str):

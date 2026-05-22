@@ -15,7 +15,7 @@ def _field(label: str, value: object, width: int = 26) -> str:
 
 def format_queue_result(result: QueueCommandResult) -> str:
     summary = result.summary
-    pages = f"{_n(summary.discovered_pages)} / {_n(summary.discovered_pages)}"
+    local_work = summary.cached_posts > 0
     lines = [
         "six2one queue",
         "",
@@ -26,15 +26,17 @@ def format_queue_result(result: QueueCommandResult) -> str:
         _field("posts", result.backend_posts),
         _field("images", result.backend_images),
         "",
-        "Phase 1/1: Discovering posts",
-        _field("pages", pages),
-        _field("cached post JSON", _n(summary.cached_posts)),
+        "Plan",
+        _field("local matching posts", _n(summary.cached_posts)),
+        _field("already downloaded", _n(summary.already_downloaded)),
+        _field("already queued", _n(summary.already_queued)),
+        _field("skipped", _n(summary.skipped)),
+        "",
+        "Queued work",
         _field("page discovery jobs", _n(summary.page_jobs)),
         _field("enrichment jobs", _n(summary.enrichment_jobs)),
-        _field("new image jobs", _n(summary.new_image_jobs)),
-        _field("already queued", _n(summary.already_queued)),
-        _field("already downloaded", _n(summary.already_downloaded)),
-        _field("skipped", _n(summary.skipped)),
+        _field("evaluation jobs", _n(summary.evaluation_jobs)),
+        _field("image jobs", _n(summary.new_image_jobs)),
         "",
         "Queued." if result.queued_anything else "Nothing new was queued.",
         "",
@@ -44,17 +46,15 @@ def format_queue_result(result: QueueCommandResult) -> str:
         lines.append(_field("Source run", result.source_run_id))
     lines.extend([
         _field("Query", result.query),
-        _field("Discovered pages", _n(summary.discovered_pages)),
-        _field("Cached posts", _n(summary.cached_posts)),
+        _field("Local matching posts", _n(summary.cached_posts)),
         _field("Page discovery jobs", _n(summary.page_jobs)),
+        _field("Evaluation jobs", _n(summary.evaluation_jobs)),
     ])
     if result.queued_anything:
-        lines.append(_field("Enrichment jobs queued", _n(summary.enrichment_jobs)))
-        lines.append(_field("Images queued", _n(summary.new_image_jobs)))
-        if summary.already_queued:
-            lines.append(_field("Already queued", _n(summary.already_queued)))
-        if summary.already_downloaded:
-            lines.append(_field("Already downloaded", _n(summary.already_downloaded)))
+        if local_work and summary.new_image_jobs == 0:
+            lines.append(_field("Image jobs", "created after evaluation"))
+        else:
+            lines.append(_field("Image jobs", _n(summary.new_image_jobs)))
         if summary.failed_page_jobs:
             lines.append(_field("Failed page jobs", _n(summary.failed_page_jobs)))
         lines.extend(["", "Next", "  Download queued images:", "    621 fetch --queue", "", "  Inspect queue:", "    621 queue list"])
@@ -80,10 +80,14 @@ def _format_full(result: QueueListResult) -> str:
         "Status",
         _field("Active source runs", _n(status.active_source_runs)),
         _field("Pending jobs", _n(status.pending_jobs)),
+        _field("Pending page jobs", _n(status.pending_page_jobs)),
         _field("Pending enrichment jobs", _n(status.pending_enrichment_jobs)),
+        _field("Pending evaluation jobs", _n(status.pending_evaluation_jobs)),
         _field("Pending image jobs", _n(status.pending_image_jobs)),
         _field("Failed jobs", _n(status.failed_jobs)),
+        _field("Failed page jobs", _n(status.failed_page_jobs)),
         _field("Failed enrichment jobs", _n(status.failed_enrichment_jobs)),
+        _field("Failed evaluation jobs", _n(status.failed_evaluation_jobs)),
         _field("Failed image jobs", _n(status.failed_image_jobs)),
         _field("Downloaded images", _n(status.downloaded_images)),
         _field("Cached post JSON", _n(status.cached_post_json)),
@@ -120,18 +124,23 @@ def _format_full(result: QueueListResult) -> str:
 
 
 def _format_run(index: int, run: SourceRunQueueSummary) -> list[str]:
-    pages = "n/a" if run.discovered_pages is None else f"{run.discovered_pages:,}"
+    pages = "n/a" if run.discovered_pages is None else f"{run.discovered_pages:,} / {run.total_page_jobs:,}"
     lines = [
         f"  {index}. {run.query}",
         _field("id", run.id, width=27),
         _field("state", run.state, width=27),
-        _field("discovered pages", pages, width=27),
-        _field("cached posts", _n(run.cached_posts), width=27),
+        _field("page discovery", pages, width=27),
+        _field("local matching posts", _n(run.cached_posts), width=27),
+        _field("already downloaded", _n(run.already_downloaded), width=27),
         _field("pending jobs", _n(run.pending_jobs), width=27),
+        _field("pending page jobs", _n(run.pending_page_jobs), width=27),
         _field("pending enrichment jobs", _n(run.pending_enrichment_jobs), width=27),
+        _field("pending evaluation jobs", _n(run.pending_evaluation_jobs), width=27),
         _field("pending image jobs", _n(run.pending_image_jobs), width=27),
         _field("failed jobs", _n(run.failed_jobs), width=27),
+        _field("failed page jobs", _n(run.failed_page_jobs), width=27),
         _field("failed enrichment jobs", _n(run.failed_enrichment_jobs), width=27),
+        _field("failed evaluation jobs", _n(run.failed_evaluation_jobs), width=27),
         _field("failed image jobs", _n(run.failed_image_jobs), width=27),
         _field("downloaded images", _n(run.downloaded_images), width=27),
         _field("removed image jobs", _n(run.removed_image_jobs), width=27),
@@ -144,11 +153,11 @@ def _format_run(index: int, run: SourceRunQueueSummary) -> list[str]:
 
 
 def _format_compact(result: QueueListResult) -> str:
-    lines = [f"{'ID':<17} {'State':<12} {'Query':<44} {'Pending':>8} {'Enrich':>8} {'Images':>8} {'Failed':>8} {'Done':>8} Pages"]
+    lines = [f"{'ID':<17} {'State':<12} {'Query':<44} {'Local':>10} {'Pending':>8} {'Eval':>8} {'Images':>8} {'Failed':>8} {'Done':>8} Pages"]
     for run in result.runs:
-        pages = "n/a" if run.discovered_pages is None else f"{run.discovered_pages} discovered"
+        pages = "n/a" if run.discovered_pages is None else f"{run.discovered_pages}/{run.total_page_jobs}"
         query = run.query if len(run.query) <= 44 else run.query[:41] + "..."
-        lines.append(f"{run.id:<17} {run.state:<12} {query:<44} {run.pending_jobs:>8,} {run.pending_enrichment_jobs:>8,} {run.pending_image_jobs:>8,} {run.failed_jobs:>8,} {run.downloaded_images:>8,} {pages}")
+        lines.append(f"{run.id:<17} {run.state:<12} {query:<44} {run.cached_posts:>10,} {run.pending_jobs:>8,} {run.pending_evaluation_jobs:>8,} {run.pending_image_jobs:>8,} {run.failed_jobs:>8,} {run.downloaded_images:>8,} {pages}")
     return "\n".join(lines)
 
 
@@ -167,33 +176,33 @@ def _format_failed(result: QueueListResult) -> str:
 
 
 def format_queue_clear_preview(preview: QueueClearPreview) -> str:
-    if preview.source_runs_affected == 0 and preview.pending_image_jobs == 0 and preview.failed_image_jobs == 0 and preview.matching_image_jobs == 0 and preview.source_run is None:
+    if preview.source_runs_affected == 0 and preview.pending_jobs == 0 and preview.failed_jobs == 0 and preview.matching_jobs == 0 and preview.source_run is None:
         if preview.failed_only:
-            return "There are no failed image jobs.\n\nNothing was changed."
-        return "The queue has no pending or failed image jobs.\n\nNothing was changed."
+            return "There are no failed queue jobs.\n\nNothing was changed."
+        return "The queue has no pending or failed jobs.\n\nNothing was changed."
     if preview.target and not preview.target.isdigit():
         lines = ["Matched queued image jobs", "", "Filter", f"  {preview.target}", "", "Source runs affected", f"  {preview.source_runs_affected}", "", f"This will remove {_n(preview.matching_image_jobs)} pending image jobs from the queue."]
     elif preview.source_run:
         run = preview.source_run
-        lines = ["Matched source run", "", f"  {run.query}", _field("id", run.id, width=25), _field("state", run.state, width=25), _field("cached posts", _n(run.cached_posts), width=25), _field("pending image jobs", _n(run.pending_image_jobs), width=25), _field("failed image jobs", _n(run.failed_image_jobs), width=25), _field("downloaded images", _n(run.downloaded_images), width=25), _field("removed image jobs", _n(run.removed_image_jobs), width=25), "", "This will remove failed image jobs for this source run only." if preview.failed_only else "This will remove all pending and failed image jobs for this source run."]
+        lines = ["Matched source run", "", f"  {run.query}", _field("id", run.id, width=25), _field("state", run.state, width=25), _field("cached posts", _n(run.cached_posts), width=25), _field("pending jobs", _n(preview.pending_jobs), width=25), _field("failed jobs", _n(preview.failed_jobs), width=25), _field("pending image jobs", _n(run.pending_image_jobs), width=25), _field("failed image jobs", _n(run.failed_image_jobs), width=25), _field("downloaded images", _n(run.downloaded_images), width=25), _field("removed image jobs", _n(run.removed_image_jobs), width=25), "", "This will remove failed jobs for this source run only." if preview.failed_only else "This will remove all pending and failed jobs for this source run."]
     else:
-        lines = ["This will remove failed image jobs from the queue." if preview.failed_only else "This will remove all pending and failed image jobs from the queue.", "", "Failed jobs" if preview.failed_only else "Queue", _field("Source runs affected", _n(preview.source_runs_affected)), _field("Pending image jobs", _n(preview.pending_image_jobs)), _field("Failed image jobs", _n(preview.failed_image_jobs))]
+        lines = ["This will remove failed jobs from the queue." if preview.failed_only else "This will remove all pending and failed jobs from the queue.", "", "Failed jobs" if preview.failed_only else "Queue", _field("Source runs affected", _n(preview.source_runs_affected)), _field("Pending jobs", _n(preview.pending_jobs)), _field("Failed jobs", _n(preview.failed_jobs)), _field("Pending image jobs", _n(preview.pending_image_jobs)), _field("Failed image jobs", _n(preview.failed_image_jobs))]
     if preview.failed_only:
-        lines.extend(["", "Pending image jobs will remain queued."])
+        lines.extend(["", "Pending jobs will remain queued."])
     lines.extend(["", "Storage untouched", _field("Cached post JSON", "unchanged"), _field("Downloaded images", "unchanged"), _field("Source run metadata", "kept"), "", "Continue? [y/N]"])
     return "\n".join(lines)
 
 
 def format_queue_clear_result(result: QueueClearResult) -> str:
     if result.failed_only:
-        headline = "Failed image jobs removed."
+        headline = "Failed jobs removed."
     elif result.target and result.target.isdigit():
-        headline = "Cleared image jobs for source run."
+        headline = "Cleared jobs for source run."
     elif result.target:
         headline = "Removed matching queued image jobs."
     else:
         headline = "Queue cleared."
-    lines = [headline, "", "Removed", _field("Pending image jobs", _n(result.pending_removed)), _field("Failed image jobs", _n(result.failed_removed)), _field("Source runs affected", _n(result.source_runs_affected)), "", "Kept", _field("Cached post JSON", _n(result.cached_post_json) if result.cached_post_json else "unchanged"), _field("Downloaded images", _n(result.downloaded_images) if result.downloaded_images else "unchanged"), _field("Source run metadata", "kept")]
+    lines = [headline, "", "Removed", _field("Pending jobs", _n(result.pending_removed)), _field("Failed jobs", _n(result.failed_removed)), _field("Source runs affected", _n(result.source_runs_affected)), "", "Kept", _field("Cached post JSON", _n(result.cached_post_json) if result.cached_post_json else "unchanged"), _field("Downloaded images", _n(result.downloaded_images) if result.downloaded_images else "unchanged"), _field("Source run metadata", "kept")]
     return "\n".join(lines)
 
 

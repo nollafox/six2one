@@ -182,26 +182,47 @@ def queue_query_work(
             eval_jobs = 0
         _progress_update(phase)
 
+    counts = EnqueuePlanCounts(
+        discovered_pages=discovered_pages,
+        cached_posts=len(post_ids),
+        page_jobs=page_jobs,
+        new_image_jobs=image_counts["new_image_jobs"],
+        already_queued=image_counts["already_queued"],
+        already_downloaded=image_counts["already_downloaded"],
+        skipped=image_counts["skipped"],
+        enrichment_jobs=enrichment_jobs,
+        evaluation_jobs=eval_jobs,
+    )
+    _save_queue_metrics(storage, source_run.id, source_run.metadata, counts)
+
     if page_jobs == 0 and enrichment_jobs == 0 and eval_jobs == 0 and image_counts["new_image_jobs"] == 0:
         storage.source_runs.update_state(source_run.id, "success", total_candidates=len(post_ids), total_matches=len(post_ids))
+    else:
+        storage.source_runs.update_state(source_run.id, "pending", total_candidates=len(post_ids), total_matches=len(post_ids))
 
     return QueuePlanResult(
         source_run_id=source_run.id,
         query=query,
         image_variant=variant.storage_name,
         dependencies=dependencies,
-        counts=EnqueuePlanCounts(
-            discovered_pages=discovered_pages,
-            cached_posts=len(post_ids),
-            page_jobs=page_jobs,
-            new_image_jobs=image_counts["new_image_jobs"],
-            already_queued=image_counts["already_queued"],
-            already_downloaded=image_counts["already_downloaded"],
-            skipped=image_counts["skipped"],
-            enrichment_jobs=enrichment_jobs,
-            evaluation_jobs=eval_jobs,
-        ),
+        counts=counts,
     )
+
+
+def _save_queue_metrics(storage: Storage, source_run_id: SourceRunId, metadata: Mapping[str, Any], counts: EnqueuePlanCounts) -> None:
+    updated = dict(metadata)
+    updated["queue_metrics"] = {
+        "discovered_pages": counts.discovered_pages,
+        "cached_posts": counts.cached_posts,
+        "page_jobs": counts.page_jobs,
+        "new_image_jobs": counts.new_image_jobs,
+        "already_queued": counts.already_queued,
+        "already_downloaded": counts.already_downloaded,
+        "skipped": counts.skipped,
+        "enrichment_jobs": counts.enrichment_jobs,
+        "evaluation_jobs": counts.evaluation_jobs,
+    }
+    storage.source_runs.update_metadata(source_run_id, updated)
 
 
 def _candidate_post_ids(discovered_post_ids: Iterable[int], local_matching_post_ids: Iterable[int]) -> tuple[int, ...]:
